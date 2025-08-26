@@ -1,0 +1,34 @@
+/*
+ * 在application.cc中使用BleWifiIntegration的示例
+ */
+
+// 在application.cc的头部添加包含
+#include "ble/ble_wifi_integration.h"
+
+// 在Application::Start()方法中添加以下代码：
+void Application::Start() {
+    // ... 现有的初始化代码 ...
+    
+    // 启动蓝牙WiFi配网功能
+    ESP_LOGI("Application", "Starting BLE WiFi configuration...");
+    if (BleWifiIntegration::StartBleWifiConfig()) {
+        ESP_LOGI("Application", "BLE WiFi configuration started successfully");
+    } else {
+        ESP_LOGE("Application", "Failed to start BLE WiFi configuration");
+    }
+    
+    // ... 其他初始化代码 ...
+}
+
+// 在Application析构函数或停止方法中添加：
+Application::~Application() {
+    // 停止蓝牙WiFi配网
+    BleWifiIntegration::StopBleWifiConfig();
+    
+    // ... 其他清理代码 ...
+}
+
+// 可选：添加一个方法来检查状态
+bool Application::IsBleWifiConfigActive() {
+    return BleWifiIntegration::IsBleWifiConfigActive();
+}
