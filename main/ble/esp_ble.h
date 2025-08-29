@@ -43,6 +43,8 @@ uint16_t esp_ble_get_mtu(uint16_t conn_id);
 int esp_ble_write_data( uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint16_t len, uint8_t write_type);
 int esp_ble_notify_data( uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint16_t len);
 
+uint16_t esp_ble_get_notify_handle(void);
+
 typedef enum{
     BLE_EVT_CONNECTED,
     BLE_EVT_DISCONNECTED,
@@ -89,7 +91,12 @@ typedef struct{
 
 typedef void (*ble_evt_callback_t)(ble_evt_t *evt);
 
-int esp_ble_init(ble_evt_callback_t callback);
+#define BLE_EVT_CALLBACK_MAX 5
+
+int esp_ble_register_evt_callback(ble_evt_callback_t callback);
+int esp_ble_unregister_evt_callback(ble_evt_callback_t callback);
+
+int esp_ble_init(void);
 
 #ifdef __cplusplus
 }

@@ -1,4 +1,5 @@
 #include "ble_wifi_config.h"
+#include "ble_protocol.h"
 #include "esp_ble.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -12,17 +13,10 @@
 #include <functional>
 #include <vector>
 #include <algorithm>
-
+#include "wifi_configuration_ap.h"
 // 包含WiFi配置相关头文件 - 使用相对路径
 extern "C" {
 #include "ssid_manager.h"
-}
-// C++头文件不能在extern "C"块中包含
-#include "wifi_configuration_ap.h"
-
-// 从esp_ble.c中导入notify特性handle
-extern "C" {
-    extern uint16_t gatt_svr_notify_chr_val_handle;
 }
 
 #define TAG "BleWifiConfig"
@@ -73,10 +67,16 @@ static void ble_data_process_task(void* pvParameters) {
             const uint8_t *payload;
             size_t payload_len;
             
-            if (!parse_protocol_packet(queue_item.data, queue_item.data_len, &cmd, &payload, &payload_len)) {
-                ESP_LOGE(TAG, "Failed to parse protocol packet");
-                continue;
-            }
+            // if (!parse_protocol_packet(queue_item.data, queue_item.data_len, &cmd, &payload, &payload_len)) {
+            //     ESP_LOGE(TAG, "Failed to parse protocol packet");
+            //     continue;
+            // }
+            
+            // // 只处理WiFi配置相关的命令
+            // if (!ble_protocol_is_wifi_cmd(cmd)) {
+            //     ESP_LOGD(TAG, "Not a WiFi config command: 0x%02X", cmd);
+            //     continue;
+            // }
             
             // 处理命令
             size_t response_len = 0;
@@ -101,7 +101,7 @@ static void ble_data_process_task(void* pvParameters) {
             // 发送响应
             if (response_len > 0 && queue_item.conn_id != 0xFFFF) {
                 esp_ble_notify_data(queue_item.conn_id, 
-                                   gatt_svr_notify_chr_val_handle, 
+                                   esp_ble_get_notify_handle(), 
                                    g_response_buffer, response_len);
             }
         }
@@ -113,40 +113,12 @@ static void ble_data_process_task(void* pvParameters) {
 
 // 协议数据包解析
 static bool parse_protocol_packet(const uint8_t *data, size_t len, uint8_t *cmd, const uint8_t **payload, size_t *payload_len) {
-    if (len < 3) {
-        ESP_LOGE(TAG, "Packet too short: %d bytes", len);
-        return false;
-    }
-    
-    if (data[0] != BLE_WIFI_CONFIG_HEADER_BYTE1 || data[1] != BLE_WIFI_CONFIG_HEADER_BYTE2) {
-        ESP_LOGE(TAG, "Invalid header: 0x%02X 0x%02X", data[0], data[1]);
-        return false;
-    }
-    
-    *cmd = data[2];
-    *payload = (len > 3) ? &data[3] : nullptr;
-    *payload_len = (len > 3) ? len - 3 : 0;
-    
-    ESP_LOGI(TAG, "Parsed packet: cmd=0x%02X, payload_len=%d", *cmd, *payload_len);
-    return true;
+    return ble_protocol_parse_packet(data, len, cmd, payload, payload_len);
 }
 
 // 构建响应数据包
 static size_t build_response_packet(uint8_t cmd, const uint8_t *payload, size_t payload_len, uint8_t *response, size_t max_len) {
-    if (max_len < 3 + payload_len) {
-        ESP_LOGE(TAG, "Response buffer too small");
-        return 0;
-    }
-    
-    response[0] = BLE_WIFI_CONFIG_HEADER_BYTE1;
-    response[1] = BLE_WIFI_CONFIG_HEADER_BYTE2;
-    response[2] = cmd;
-    
-    if (payload && payload_len > 0) {
-        memcpy(&response[3], payload, payload_len);
-    }
-    
-    return 3 + payload_len;
+    return ble_protocol_build_packet(cmd, payload, payload_len, response, max_len);
 }
 
 // 获取当前WiFi配置
@@ -283,7 +255,7 @@ static int handle_get_scan_list_cmd(uint8_t *response, size_t max_len) {
                                                arr, offset, 
                                                response, max_len);
             if (response_len > 0 && g_conn_handle != 0xFFFF) {
-                esp_ble_notify_data(g_conn_handle, gatt_svr_notify_chr_val_handle, response, response_len);
+                esp_ble_notify_data(g_conn_handle, esp_ble_get_notify_handle(), response, response_len);
             }
 
             vTaskDelay(pdMS_TO_TICKS(10)); // 小延迟避免发送过快
@@ -343,6 +315,20 @@ static void ble_wifi_config_event_handler(ble_evt_t *evt) {
                 break;
             }
 
+            uint8_t cmd;
+            const uint8_t *payload;
+            size_t payload_len;
+
+            if (!parse_protocol_packet(evt->params.data_received.p_data, evt->params.data_received.len, &cmd, &payload, &payload_len)) {
+                // ESP_LOGE(TAG, "Failed to parse protocol packet");
+                break;
+            }
+            
+            // 只处理WiFi配置相关的命令
+            if (!ble_protocol_is_wifi_cmd(cmd)) {
+                // ESP_LOGD(TAG, "Not a WiFi config command: 0x%02X", cmd);
+                break;
+            }
             // 创建队列项
             ble_data_queue_item_t queue_item;
             queue_item.conn_id = evt->params.data_received.conn_id;
@@ -407,7 +393,7 @@ int ble_wifi_config_init(void) {
         return -1;
     }
     
-    int ret = esp_ble_init(ble_wifi_config_event_handler);
+    int ret = esp_ble_init();
     if (ret != 0) {
         ESP_LOGE(TAG, "Failed to initialize BLE: %d", ret);
         
@@ -423,7 +409,23 @@ int ble_wifi_config_init(void) {
         }
         return ret;
     }
-    
+
+    ret = esp_ble_register_evt_callback(ble_wifi_config_event_handler);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to register BLE event callback: %d", ret);
+        // 清理资源
+        g_process_task_running = false;
+        if (g_ble_process_task) {
+            vTaskDelete(g_ble_process_task);
+            g_ble_process_task = NULL;
+        }
+        if (g_ble_data_queue) {
+            vQueueDelete(g_ble_data_queue);
+            g_ble_data_queue = NULL;
+        }
+        return ret;
+    }
+
     g_ble_initialized = true;
     ESP_LOGI(TAG, "BLE WiFi config initialized");
     return 0;

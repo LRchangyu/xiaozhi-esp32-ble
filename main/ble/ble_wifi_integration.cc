@@ -7,6 +7,7 @@
 
 #include "ble_wifi_integration.h"
 #include "ble_wifi_config.h"
+#include "ble_ota.h"
 #include "esp_log.h"
 #include "wifi_configuration_ap.h"
 
@@ -41,6 +42,12 @@ static void OnWifiConfigChanged(const std::string& ssid, const std::string& pass
         
         // 连接成功后，可以选择停止蓝牙配网以节省资源
         StopBleWifiConfig();
+        
+        // 同时清理BLE OTA服务
+        auto& ble_ota = BleOta::GetInstance();
+        ble_ota.Deinitialize();
+        ESP_LOGI(TAG, "BLE OTA service deinitialized");
+        
         ESP_LOGI(TAG, "Restarting in 1 second");
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
@@ -101,6 +108,13 @@ void StopBleWifiConfig() {
     ble_wifi_config.StopAdvertising();
     ble_wifi_config.Deinitialize();
     
+    // 同时清理BLE OTA服务
+    auto& ble_ota = BleOta::GetInstance();
+    if (ble_ota.IsInitialized()) {
+        ble_ota.Deinitialize();
+        ESP_LOGI(TAG, "BLE OTA service deinitialized");
+    }
+    
     ble_wifi_config_active = false;
     ESP_LOGI(TAG, "BLE WiFi configuration stopped");
 }
@@ -112,64 +126,3 @@ bool IsBleWifiConfigActive() {
 
 } // namespace BleWifiIntegration
 
-/*
- * 建议的Application类修改：
- * 
- * 在application.h中添加：
- * 
- * class Application {
- * private:
- *     bool ble_wifi_config_enabled_ = true;  // 可配置是否启用蓝牙配网
- * 
- * public:
- *     void EnableBleWifiConfig(bool enable) { ble_wifi_config_enabled_ = enable; }
- *     bool IsBleWifiConfigEnabled() const { return ble_wifi_config_enabled_; }
- * };
- * 
- * 在application.cc的Application::Start()中添加：
- * 
- * void Application::Start() {
- *     // ... 现有初始化代码 ...
- * 
- *     // 启动蓝牙WiFi配网功能（如果启用）
- *     if (ble_wifi_config_enabled_) {
- *         BleWifiIntegration::StartBleWifiConfig();
- *     }
- * 
- *     // ... 其他初始化代码 ...
- * }
- * 
- * 在application.cc的析构函数或停止函数中添加：
- * 
- * Application::~Application() {
- *     BleWifiIntegration::StopBleWifiConfig();
- *     // ... 其他清理代码 ...
- * }
- */
-
-/*
- * Kconfig配置建议：
- * 
- * 在main/Kconfig.projbuild中添加：
- * 
- * config ENABLE_BLE_WIFI_CONFIG
- *     bool "Enable BLE WiFi Configuration"
- *     default y
- *     help
- *       Enable Bluetooth Low Energy WiFi configuration service.
- *       This allows configuring WiFi credentials via BLE.
- * 
- * config BLE_WIFI_CONFIG_AUTO_START
- *     bool "Auto start BLE WiFi config on boot"
- *     depends on ENABLE_BLE_WIFI_CONFIG
- *     default y
- *     help
- *       Automatically start BLE WiFi configuration service on boot.
- * 
- * config BLE_WIFI_CONFIG_STOP_AFTER_CONNECT
- *     bool "Stop BLE config after WiFi connection"
- *     depends on ENABLE_BLE_WIFI_CONFIG
- *     default n
- *     help
- *       Stop BLE WiFi configuration service after successful WiFi connection.
- */

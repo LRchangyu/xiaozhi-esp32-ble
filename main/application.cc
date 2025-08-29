@@ -5,7 +5,6 @@
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
-#include "font_awesome_symbols.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 
@@ -17,8 +16,9 @@
 
 #include "settings.h"
 #include "ble_wifi_integration.h"
+#include "ble_ota.h"
 #include <ssid_manager.h>
-
+#include <font_awesome.h>
 #define TAG "Application"
 
 
@@ -91,7 +91,7 @@ void Application::CheckNewVersion(Ota& ota) {
 
             char buffer[256];
             snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, ota.GetCheckVersionUrl().c_str());
-            Alert(Lang::Strings::ERROR, buffer, "sad", Lang::Sounds::OGG_EXCLAMATION);
+            Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
 
             ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay, retry_count, MAX_RETRY);
             for (int i = 0; i < retry_delay; i++) {
@@ -107,13 +107,12 @@ void Application::CheckNewVersion(Ota& ota) {
         retry_delay = 10; // 重置重试延迟时间
 
         if (ota.HasNewVersion()) {
-            Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "happy", Lang::Sounds::OGG_UPGRADE);
+            Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
 
             vTaskDelay(pdMS_TO_TICKS(3000));
 
             SetDeviceState(kDeviceStateUpgrading);
             
-            display->SetIcon(FONT_AWESOME_DOWNLOAD);
             std::string message = std::string(Lang::Strings::NEW_VERSION) + ota.GetFirmwareVersion();
             display->SetChatMessage("system", message.c_str());
 
@@ -134,7 +133,7 @@ void Application::CheckNewVersion(Ota& ota) {
                 ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
                 audio_service_.Start(); // Restart audio service
                 board.SetPowerSaveMode(true); // Restore power save mode
-                Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "sad", Lang::Sounds::OGG_EXCLAMATION);
+                Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
                 vTaskDelay(pdMS_TO_TICKS(3000));
                 // Continue to normal operation (don't break, just fall through)
             } else {
@@ -199,7 +198,7 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
     }};
 
     // This sentence uses 9KB of SRAM, so we need to wait for it to finish
-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "happy", Lang::Sounds::OGG_ACTIVATION);
+    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
 
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
@@ -211,7 +210,7 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
 }
 
 void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
-    ESP_LOGW(TAG, "Alert %s: %s [%s]", status, message, emotion);
+    ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
     display->SetEmotion(emotion);
@@ -339,6 +338,8 @@ bool Application::IsWifiConfigMode() {
 
 void Application::Start() {
 
+    ESP_LOGI(TAG, "\r\n\r\n OTA flag 0003 ！！！！！！！！！！！\r\n\r\n");
+
     bool en = IsWifiConfigMode();
 
     auto& board = Board::GetInstance();
@@ -369,6 +370,30 @@ void Application::Start() {
 
     if (en && ble_wifi_config_enabled_) {
         BleWifiIntegration::StartBleWifiConfig();
+        
+        // 同时启动BLE OTA功能
+        auto& ble_ota = BleOta::GetInstance();
+        if (ble_ota.Initialize()) {
+            ESP_LOGI(TAG, "BLE OTA service initialized successfully");
+            
+            // 设置OTA进度回调（可选）
+            ble_ota.SetProgressCallback([](int progress) {
+                ESP_LOGI(TAG, "BLE OTA progress: %d%%", progress);
+            });
+            
+            // 设置OTA完成回调（可选）
+            ble_ota.SetCompleteCallback([](bool success) {
+                if (success) {
+                    ESP_LOGI(TAG, "BLE OTA completed successfully, restarting...");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    esp_restart();
+                } else {
+                    ESP_LOGE(TAG, "BLE OTA failed");
+                }
+            });
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize BLE OTA service");
+        }
     }
     /* Wait for the network to be ready */
     board.StartNetwork();
@@ -394,6 +419,10 @@ void Application::Start() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+
+    protocol_->OnConnected([this]() {
+        DismissAlert();
+    });
 
     protocol_->OnNetworkError([this](const std::string& message) {
         last_error_message_ = message;
@@ -520,7 +549,7 @@ void Application::Start() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
     }
-    
+
     // Print heap stats
     SystemInfo::PrintHeapStats();
 }
@@ -563,7 +592,7 @@ void Application::MainEventLoop() {
             MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & MAIN_EVENT_ERROR) {
             SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "sad", Lang::Sounds::OGG_EXCLAMATION);
+            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {

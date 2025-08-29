@@ -26,8 +26,11 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
 
             "ble/esp_ble.c"
+            "ble/ble_protocol.c"
             "ble/ble_wifi_config.cc"
             "ble/ble_wifi_integration.cc"
+            "ble/ble_ota.c"
+            "ble/ble_ota.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "audio" "protocols" "ble")
@@ -90,6 +93,8 @@ elseif(CONFIG_BOARD_TYPE_ATOMS3R_ECHO_BASE)
     set(BOARD_TYPE "atoms3r-echo-base")
 elseif(CONFIG_BOARD_TYPE_ATOMS3R_CAM_M12_ECHO_BASE)
     set(BOARD_TYPE "atoms3r-cam-m12-echo-base")
+elseif(CONFIG_BOARD_TYPE_ATOM_ECHOS3R)
+    set(BOARD_TYPE "atom-echos3r")
 elseif(CONFIG_BOARD_TYPE_ATOMMATRIX_ECHO_BASE)
     set(BOARD_TYPE "atommatrix-echo-base")
 elseif(CONFIG_BOARD_TYPE_XMINI_C3_V3)

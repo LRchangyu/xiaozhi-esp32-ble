@@ -45,7 +45,7 @@ static struct ble_gap_adv_params adv_params;
 static uint16_t m_mtu = 23;
 static bool m_notify_en = false;
 
-static ble_evt_callback_t g_ble_event_callback = NULL;
+static ble_evt_callback_t g_ble_event_callbacks[BLE_EVT_CALLBACK_MAX] = {NULL};
 
 ///Declare static functions
 static int adv_start(void);
@@ -105,6 +105,11 @@ static const ble_uuid128_t gatt_svr_notify_chr_uuid =
     0x00, 0x10,
     0x00, 0x00,
     0xD2, 0xFD, 0x00, 0x00);
+
+uint16_t esp_ble_get_notify_handle(void)
+{
+    return gatt_svr_notify_chr_val_handle;
+}
 
 static int gatt_svc_access(uint16_t conn_handle, uint16_t attr_handle,
                 struct ble_gatt_access_ctxt *ctxt,
@@ -178,7 +183,15 @@ static int gatt_svc_access(uint16_t conn_handle, uint16_t attr_handle,
         }
         
         if (attr_handle == gatt_svr_write_chr_val_handle) {
-            if (ctxt->om != NULL && g_ble_event_callback != NULL) {
+            bool has_callback = false;
+            for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+                if (g_ble_event_callbacks[i] != NULL) {
+                    has_callback = true;
+                    break;
+                }
+            }
+            
+            if (ctxt->om != NULL && has_callback) {
                 // 获取数据长度
                 uint16_t data_len = OS_MBUF_PKTLEN(ctxt->om);
                 
@@ -187,15 +200,19 @@ static int gatt_svc_access(uint16_t conn_handle, uint16_t attr_handle,
                 if (data_buffer != NULL) {
                     int ret = ble_hs_mbuf_to_flat(ctxt->om, data_buffer, data_len, NULL);
                     if (ret == 0) {
-                        // 构造事件并调用回调
+                        // 构造事件并调用所有回调
                         ble_evt_t evt;
                         evt.evt_id = BLE_EVT_DATA_RECEIVED;
                         evt.params.data_received.conn_id = conn_handle;
                         evt.params.data_received.handle = attr_handle;
                         evt.params.data_received.p_data = data_buffer;
                         evt.params.data_received.len = data_len;
-                        
-                        g_ble_event_callback(&evt);
+                        // ESP_LOG_BUFFER_HEX(TAG, data_buffer, data_len);
+                        for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+                            if (g_ble_event_callbacks[i] != NULL) {
+                                g_ble_event_callbacks[i](&evt);
+                            }
+                        }
                     }
                     free(data_buffer);
                 }
@@ -762,15 +779,29 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         }
         
         // 通知应用层连接事件
-        if (g_ble_event_callback != NULL) {
-            ble_evt_t evt;
-            evt.evt_id = BLE_EVT_CONNECTED;
-            evt.params.connected.conn_id = event->connect.conn_handle;
-            evt.params.connected.role = dev_desc.role;
-            // 这里需要获取远程设备地址，暂时置0
-            memset(evt.params.connected.remote_bda, 0, 6);
-            evt.params.connected.remote_addr_type = 0;
-            g_ble_event_callback(&evt);
+        for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+            if (g_ble_event_callbacks[i] != NULL) {
+                ble_evt_t evt;
+                evt.evt_id = BLE_EVT_CONNECTED;
+                evt.params.connected.conn_id = event->connect.conn_handle;
+                evt.params.connected.role = dev_desc.role;
+                // 这里需要获取远程设备地址，暂时置0
+                memset(evt.params.connected.remote_bda, 0, 6);
+                evt.params.connected.remote_addr_type = 0;
+                g_ble_event_callbacks[i](&evt);
+            }
+        }
+        const struct ble_gap_upd_params conn_params = {
+            .latency = 0,
+            .itvl_max = 24,
+            .itvl_min = 12,
+            .supervision_timeout = 500
+        };
+
+        ret = ble_gap_update_params(event->connect.conn_handle,&conn_params);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GAP conn params update failed:%d",ret);
+            break;
         }
     break;
 
@@ -778,13 +809,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG,"BLE_GAP_EVENT_DISCONNECT:%x,%d",event->disconnect.reason,event->disconnect.conn.conn_handle);
         
         // 通知应用层断开连接事件
-        if (g_ble_event_callback != NULL) {
-            ble_evt_t evt;
-            evt.evt_id = BLE_EVT_DISCONNECTED;
-            evt.params.disconnected.conn_id = event->disconnect.conn.conn_handle;
-            memset(evt.params.disconnected.remote_bda, 0, 6);
-            evt.params.disconnected.remote_addr_type = 0;
-            g_ble_event_callback(&evt);
+        for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+            if (g_ble_event_callbacks[i] != NULL) {
+                ble_evt_t evt;
+                evt.evt_id = BLE_EVT_DISCONNECTED;
+                evt.params.disconnected.conn_id = event->disconnect.conn.conn_handle;
+                memset(evt.params.disconnected.remote_bda, 0, 6);
+                evt.params.disconnected.remote_addr_type = 0;
+                g_ble_event_callbacks[i](&evt);
+            }
         }
         
         if(event->disconnect.conn.role == BLE_GAP_ROLE_SLAVE){
@@ -916,6 +949,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG,"BLE_GAP_EVENT_CONN_UPDATE:%d,%d",event->conn_update.status,event->conn_update.conn_handle);
     break;
     
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        ESP_LOGI(TAG,"BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:%d,%d,%d",
+            event->phy_updated.conn_handle,
+            event->phy_updated.tx_phy,
+            event->phy_updated.rx_phy);
+    break;
     default:
         break;
     }
@@ -1005,7 +1044,45 @@ int esp_ble_disconnect(uint16_t conn_id){
     return ble_gap_terminate(conn_id, BLE_ERR_REM_USER_CONN_TERM);
 }
 
-int esp_ble_init(ble_evt_callback_t callback)
+int esp_ble_register_evt_callback(ble_evt_callback_t callback)
+{
+    if (callback == NULL) {
+        ESP_LOGE(TAG, "Callback is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+        if (g_ble_event_callbacks[i] == NULL) {
+            g_ble_event_callbacks[i] = callback;
+            ESP_LOGI(TAG, "Registered BLE callback at index %d", i);
+            return ESP_OK;
+        }
+    }
+    
+    ESP_LOGE(TAG, "No more callback slots available");
+    return ESP_ERR_NO_MEM;
+}
+
+int esp_ble_unregister_evt_callback(ble_evt_callback_t callback)
+{
+    if (callback == NULL) {
+        ESP_LOGE(TAG, "Callback is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+        if (g_ble_event_callbacks[i] == callback) {
+            g_ble_event_callbacks[i] = NULL;
+            ESP_LOGI(TAG, "Unregistered BLE callback at index %d", i);
+            return ESP_OK;
+        }
+    }
+    
+    ESP_LOGE(TAG, "Callback not found");
+    return ESP_ERR_NOT_FOUND;
+}
+
+int esp_ble_init(void)
 {
     esp_err_t ret;
 
@@ -1014,8 +1091,6 @@ int esp_ble_init(ble_evt_callback_t callback)
         ESP_LOGE(TAG, "Failed to init nimble %d ", ret);
         return ret;
     }
-
-    g_ble_event_callback = callback;
 
     ble_hs_cfg.reset_cb = ble_on_reset;
     ble_hs_cfg.sync_cb = ble_on_sync;
