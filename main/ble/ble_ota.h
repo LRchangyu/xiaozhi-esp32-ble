@@ -49,6 +49,12 @@ esp_err_t ble_ota_init(ble_ota_progress_callback_t progress_cb);
 // OTA模块去初始化
 esp_err_t ble_ota_deinit(void);
 
+// 注册OTA协议处理器
+esp_err_t ble_ota_register_handlers(void);
+
+// 注销OTA协议处理器
+esp_err_t ble_ota_unregister_handlers(void);
+
 // 获取当前OTA状态
 ble_ota_state_t ble_ota_get_state(void);
 

@@ -40,17 +40,17 @@ static void OnWifiConfigChanged(const std::string& ssid, const std::string& pass
     if (connected) {
         ESP_LOGI(TAG, "Successfully connected to WiFi: %s", ssid.c_str());
         
-        // 连接成功后，可以选择停止蓝牙配网以节省资源
-        StopBleWifiConfig();
+        // // 连接成功后，可以选择停止蓝牙配网以节省资源
+        // StopBleWifiConfig();
         
-        // 同时清理BLE OTA服务
-        auto& ble_ota = BleOta::GetInstance();
-        ble_ota.Deinitialize();
-        ESP_LOGI(TAG, "BLE OTA service deinitialized");
+        // // 同时清理BLE OTA服务
+        // auto& ble_ota = BleOta::GetInstance();
+        // ble_ota.Deinitialize();
+        // ESP_LOGI(TAG, "BLE OTA service deinitialized");
         
-        ESP_LOGI(TAG, "Restarting in 1 second");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
+        // ESP_LOGI(TAG, "Restarting in 1 second");
+        // vTaskDelay(pdMS_TO_TICKS(1000));
+        // esp_restart();
     } else {
         ESP_LOGW(TAG, "Failed to connect to WiFi: %s", ssid.c_str());
     }

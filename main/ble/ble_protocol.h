@@ -52,7 +52,25 @@ typedef struct {
 } ble_protocol_packet_t;
 
 // 协议处理函数类型定义
-typedef int (*ble_protocol_handler_t)(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len);
+typedef esp_err_t (*ble_protocol_handler_t)(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len);
+
+// 动态指令注册结构
+typedef struct {
+    uint8_t cmd;
+    ble_protocol_handler_t handler;
+    const char* name;
+} ble_protocol_cmd_handler_t;
+
+// 最大支持的指令处理器数量
+#define BLE_PROTOCOL_MAX_HANDLERS 16
+
+// 协议管理器初始化和去初始化
+esp_err_t ble_protocol_init(void);
+esp_err_t ble_protocol_deinit(void);
+
+// 动态注册指令处理器
+esp_err_t ble_protocol_register_handler(uint8_t cmd, ble_protocol_handler_t handler, const char* name);
+esp_err_t ble_protocol_unregister_handler(uint8_t cmd);
 
 // 协议解析函数
 bool ble_protocol_parse_packet(const uint8_t *data, size_t len, uint8_t *cmd, const uint8_t **payload, size_t *payload_len);
@@ -63,12 +81,6 @@ size_t ble_protocol_build_packet(uint8_t cmd, const uint8_t *payload, size_t pay
 // 协议发送函数
 esp_err_t ble_protocol_send_response(uint16_t conn_id, uint8_t cmd, const uint8_t *payload, uint16_t payload_len);
 
-// 协议验证函数
-bool ble_protocol_validate_packet(const uint8_t *data, size_t len);
-
-// 协议命令类型判断
-bool ble_protocol_is_wifi_cmd(uint8_t cmd);
-bool ble_protocol_is_ota_cmd(uint8_t cmd);
 
 #ifdef __cplusplus
 }

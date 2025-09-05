@@ -39,11 +39,9 @@ static const char* TAG = "esp_ble";
 #define BLE_MTU_MAX CONFIG_NIMBLE_ATT_PREFERRED_MTU
 #define OWN_ADDR_TYPE BLE_OWN_ADDR_RANDOM
 static bool m_ble_sync_flag = false;
-static bool m_ble_scan_need_recover = false;
+// static bool m_ble_scan_need_recover = false;
 struct ble_hs_cfg ble_hs_cfg;
 static struct ble_gap_adv_params adv_params;
-static uint16_t m_mtu = 23;
-static bool m_notify_en = false;
 
 static ble_evt_callback_t g_ble_event_callbacks[BLE_EVT_CALLBACK_MAX] = {NULL};
 
@@ -76,6 +74,128 @@ static void mac_rever(uint8_t*p_tar,uint8_t*p_src)
     p_tar[5] = src_cpy[0];
 
 }
+
+static esp_timer_handle_t periodic_conn_param_timer;
+
+typedef struct {
+    uint8_t connected;
+    uint8_t updated;
+    uint8_t counter;
+    uint8_t remote_bda[6];
+    uint8_t role;
+} connparam_check_t;
+static connparam_check_t connparam_check[MAX_CONN_INSTANCES] = {0};
+
+static void connparam_init(uint16_t conn_handle,uint8_t role,uint8_t remote_bda[6]){
+    if(conn_handle >= MAX_CONN_INSTANCES)
+        return;
+    
+    connparam_check[conn_handle].counter = 0;
+    connparam_check[conn_handle].role = role;
+    connparam_check[conn_handle].updated = 0;
+    memcpy(connparam_check[conn_handle].remote_bda, remote_bda, 6);
+    connparam_check[conn_handle].connected = 1;
+    ESP_LOGI(TAG, "Connection parameters initialized: %d,%d", conn_handle, role);
+}
+
+static void connparam_deinit(uint16_t conn_handle){
+    if(conn_handle >= MAX_CONN_INSTANCES)
+        return;
+    connparam_check[conn_handle].connected = 0;
+    connparam_check[conn_handle].updated = 0;
+}
+
+static void connparam_update_timer_cb(void *arg)
+{
+    esp_err_t ret;
+    const struct ble_gap_upd_params conn_params = {
+            .latency = 0,
+            .itvl_max = 24,
+            .itvl_min = 12,
+            .supervision_timeout = 500
+        };
+    for(int i = 0; i < MAX_CONN_INSTANCES; i++)
+    {
+        if(connparam_check[i].connected  == 0 
+            || connparam_check[i].role != BLE_GAP_ROLE_SLAVE
+            || connparam_check[i].updated == 1)
+            continue;
+
+        if(connparam_check[i].counter < 5)
+        {
+            ESP_LOGI(TAG, "conn:%d counter:%d", i, connparam_check[i].counter);
+            connparam_check[i].counter++;
+            continue;
+        }
+
+        ret = ble_gap_update_params(i,&conn_params);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GAP conn params update failed:%d",ret);
+            continue;
+        }
+        ESP_LOGI(TAG, "GAP conn params update sent");
+        connparam_check[i].updated = 1;
+        
+    }
+}
+
+static void connparam_update_timer_init(void){
+
+    const esp_timer_create_args_t periodic_timer_args = {
+            .callback = &connparam_update_timer_cb,
+            /* name is optional, but may help identify the timer when debugging */
+            .name = "cp_tm"
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_conn_param_timer));
+
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_conn_param_timer, 1000000));
+}
+/*================================================================================*/
+
+static uint16_t m_mtu[MAX_CONN_INSTANCES] ;
+static void mtu_init(void){
+    for(int i = 0; i < MAX_CONN_INSTANCES; i++){
+        m_mtu[i] = 23;
+    }
+}
+
+static int mtu_get(uint16_t conn_id)
+{
+    if (conn_id >= MAX_CONN_INSTANCES) {
+        return -1;
+    }
+    return m_mtu[conn_id];
+}
+
+static int mtu_set(uint16_t conn_id, uint16_t mtu)
+{
+    if (conn_id >= MAX_CONN_INSTANCES) {
+        return -1;
+    }
+    m_mtu[conn_id] = mtu;
+    return 0;
+}
+/*================================================================================*/
+static uint8_t m_notify_en[MAX_CONN_INSTANCES] = {0};
+
+static int notify_is_enable(uint16_t conn_id)
+{
+    if (conn_id >= MAX_CONN_INSTANCES) {
+        return -1;
+    }
+    return m_notify_en[conn_id];
+}
+
+static int notify_set_enable(uint16_t conn_id, uint8_t enable)
+{
+    if (conn_id >= MAX_CONN_INSTANCES) {
+        return -1;
+    }
+    m_notify_en[conn_id] = enable;
+    return 0;
+}
+
 //=============================================================================================================================//
 /*
 gatts info
@@ -105,12 +225,7 @@ static const ble_uuid128_t gatt_svr_notify_chr_uuid =
     0x00, 0x10,
     0x00, 0x00,
     0xD2, 0xFD, 0x00, 0x00);
-
-uint16_t esp_ble_get_notify_handle(void)
-{
-    return gatt_svr_notify_chr_val_handle;
-}
-
+    
 static int gatt_svc_access(uint16_t conn_handle, uint16_t attr_handle,
                 struct ble_gatt_access_ctxt *ctxt,
                 void *arg);
@@ -192,31 +307,18 @@ static int gatt_svc_access(uint16_t conn_handle, uint16_t attr_handle,
             }
             
             if (ctxt->om != NULL && has_callback) {
-                // 获取数据长度
-                uint16_t data_len = OS_MBUF_PKTLEN(ctxt->om);
-                
-                // 分配缓冲区并复制数据
-                uint8_t *data_buffer = malloc(data_len);
-                if (data_buffer != NULL) {
-                    int ret = ble_hs_mbuf_to_flat(ctxt->om, data_buffer, data_len, NULL);
-                    if (ret == 0) {
-                        // 构造事件并调用所有回调
-                        ble_evt_t evt;
-                        evt.evt_id = BLE_EVT_DATA_RECEIVED;
-                        evt.params.data_received.conn_id = conn_handle;
-                        evt.params.data_received.handle = attr_handle;
-                        evt.params.data_received.p_data = data_buffer;
-                        evt.params.data_received.len = data_len;
-                        // ESP_LOG_BUFFER_HEX(TAG, data_buffer, data_len);
-                        for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
-                            if (g_ble_event_callbacks[i] != NULL) {
-                                g_ble_event_callbacks[i](&evt);
-                            }
-                        }
+                ble_evt_t evt;
+                evt.evt_id = BLE_EVT_DATA_RECEIVED;
+                evt.params.data_received.conn_id = conn_handle;
+                evt.params.data_received.handle = gatt_svr_notify_chr_val_handle;
+                evt.params.data_received.p_data = ctxt->om->om_data;
+                evt.params.data_received.len = ctxt->om->om_len;
+                // ESP_LOG_BUFFER_HEX(TAG, data_buffer, data_len);
+                for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+                    if (g_ble_event_callbacks[i] != NULL) {
+                        g_ble_event_callbacks[i](&evt);
                     }
-                    free(data_buffer);
                 }
-                rc = 0;
             } else {
                 ESP_LOGE(TAG, "conn_handle %d write data is NULL or no callback",conn_handle);
                 rc = BLE_ATT_ERR_INVALID_PDU;
@@ -300,267 +402,11 @@ static int gatts_init(void)
 
     return 0;
 }
-//=============================================================================================================================//
-/*
-gattc info
-*/
-//=============================================================================================================================//
-typedef struct{
-    uint16_t start_handle;
-    uint16_t end_handle;
 
-    uint16_t write_handle;
-    uint16_t notify_handle;
-    uint16_t cccd_handle;
-
-}gattc_service_t;
-
-static gattc_service_t m_svr_info[MAX_CONN_INSTANCES];
-static void gattc_service_info_rst(uint16_t conn_handle)
-{
-    if(conn_handle >= MAX_CONN_INSTANCES)
-        return;
-    gattc_service_t*p_info = &m_svr_info[conn_handle];
-    p_info->start_handle = 0;
-    p_info->end_handle = 0;
-    p_info->write_handle = 0;
-    p_info->notify_handle = 0;
-    p_info->cccd_handle = 0;
-}
-
-static inline gattc_service_t* gattc_get_service_info(uint16_t conn_handle)
-{
-    if(conn_handle >= MAX_CONN_INSTANCES)
-        return NULL;
-    return &m_svr_info[conn_handle];
-}
-// typedef int ble_gatt_dsc_fn(uint16_t conn_handle,
-//                             const struct ble_gatt_error *error,
-//                             uint16_t chr_val_handle,
-//                             const struct ble_gatt_dsc *dsc,
-//                             void *arg);
-
-static int gattc_desc_cb(uint16_t conn_handle,
-                            const struct ble_gatt_error *error,
-                            uint16_t chr_val_handle,
-                            const struct ble_gatt_dsc *dsc,
-                            void *arg)
-{
-    char buf[BLE_UUID_STR_LEN+1];
-    
-    if(conn_handle >= MAX_CONN_INSTANCES) {
-        ESP_LOGE(TAG, "gattc_desc_cb: Invalid conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-    
-    gattc_service_t*p_info = gattc_get_service_info(conn_handle);
-    if(p_info == NULL) {
-        ESP_LOGE(TAG, "gattc_desc_cb: Invalid service info for conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-    switch (error->status) {
-    case 0:
-        ESP_LOGI(TAG, "Descriptor discovered; conn_handle=%d handle=%d uuid=%s",
-                                conn_handle,dsc->handle,
-                                ble_uuid_to_str((const ble_uuid_t *)&dsc->uuid,buf));
-        if(chr_val_handle == p_info->notify_handle && p_info->cccd_handle == 0
-          && dsc->uuid.u.type == BLE_UUID_TYPE_16 && dsc->uuid.u16.value == BLE_GATT_DSC_CLT_CFG_UUID16)
-        {
-            p_info->cccd_handle = dsc->handle;
-
-            uint8_t cccd_en[2] = {0x01,0x00};
-            int ret = esp_ble_write_data(conn_handle,p_info->cccd_handle,cccd_en,2,BLE_GATT_CHR_PROP_WRITE);
-            if(ret){
-                ESP_LOGE(TAG, "Conn :%d cccd %02x write failed:%d",conn_handle,p_info->cccd_handle,ret);
-            }
-        }
-        
-        break;
-
-    case BLE_HS_EDONE:
-        ESP_LOGI(TAG, "Descriptors discovery complete; conn_handle=%d status=%d",conn_handle,error->status);
-        break;
-        
-    default:
-        ESP_LOGE(TAG, "Error: Characteristic discovery failed; status=%d conn_handle=%d",error->status,conn_handle);
-        break;
-    }
-    
-    return 0;
-}
-
-// typedef int ble_gatt_chr_fn(uint16_t conn_handle,
-//                             const struct ble_gatt_error *error,
-//                             const struct ble_gatt_chr *chr, void *arg);
-
-static int char_disc_cb(uint16_t conn_handle, const struct ble_gatt_error *error, const struct ble_gatt_chr *chr, void *arg)
-{
-
-    char buf[BLE_UUID_STR_LEN+1];
-    
-    if(conn_handle >= MAX_CONN_INSTANCES) {
-        ESP_LOGE(TAG, "char_disc_cb: Invalid conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-    
-    gattc_service_t*p_info = gattc_get_service_info(conn_handle);
-    if(p_info == NULL) {
-        ESP_LOGE(TAG, "char_disc_cb: Invalid service info for conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-
-    switch (error->status) {
-    case 0:
-        ESP_LOGI(TAG, "Characteristic discovered; conn_handle=%d def_handle=%d val_handle=%d prop:%x,uuid=%s",
-                                conn_handle,chr->def_handle,
-                                chr->val_handle,
-                                chr->properties,
-                                ble_uuid_to_str((const ble_uuid_t *)&chr->uuid,buf));
-        if(chr->uuid.u.type == gatt_svr_write_chr_uuid.u.type
-        && ((chr->uuid.u.type == BLE_UUID_TYPE_16 && chr->uuid.u16.value == BLE_UUID16(&gatt_svr_write_chr_uuid)->value)
-            || (chr->uuid.u.type == BLE_UUID_TYPE_128 && memcmp(chr->uuid.u128.value,BLE_UUID128(&gatt_svr_write_chr_uuid)->value,16) == 0))
-        ){
-            if((chr->properties &(BLE_GATT_CHR_PROP_WRITE_NO_RSP | BLE_GATT_CHR_PROP_WRITE))
-            && p_info->write_handle == 0){
-                p_info->write_handle = chr->val_handle;
-                ESP_LOGI(TAG, "write_handle=%d",p_info->write_handle);
-                
-            }
-        }else if(chr->uuid.u.type == gatt_svr_notify_chr_uuid.u.type
-        && ((chr->uuid.u.type == BLE_UUID_TYPE_16 && chr->uuid.u16.value == BLE_UUID16(&gatt_svr_notify_chr_uuid)->value)
-            || (chr->uuid.u.type == BLE_UUID_TYPE_128 && memcmp(chr->uuid.u128.value,BLE_UUID128(&gatt_svr_notify_chr_uuid)->value,16) == 0))
-        ){
-            if(chr->properties & BLE_GATT_CHR_PROP_NOTIFY && p_info->notify_handle == 0){
-                p_info->notify_handle = chr->val_handle;
-                ESP_LOGI(TAG, "notify_handle=%d",p_info->notify_handle);
-
-            }
-            
-        }
-        
-        break;
-
-    case BLE_HS_EDONE:
-        ESP_LOGI(TAG, "Characteristic discovery complete; conn_handle=%d status=%d",conn_handle,error->status);
-        if(p_info->write_handle == 0 && p_info->notify_handle == 0){
-            ESP_LOGE(TAG, "Characteristic not found");
-            esp_ble_disconnect(conn_handle);
-        }else if(p_info->notify_handle != 0 && p_info->notify_handle > p_info->start_handle && p_info->notify_handle < p_info->end_handle){
-            ble_gattc_disc_all_dscs(conn_handle,p_info->notify_handle,p_info->end_handle,gattc_desc_cb,NULL);
-        }else{
-        }
-        break;
-        
-    default:
-        ESP_LOGE(TAG, "Error: Characteristic discovery failed; status=%d conn_handle=%d",error->status,conn_handle);
-        break;
-    }
-    
-    return 0;
-}
-
-static int gattc_find_char(uint16_t conn_handle)
-{
-    int ret;
-    if(conn_handle >= MAX_CONN_INSTANCES)
-        return -1;
-    gattc_service_t*p_info = gattc_get_service_info(conn_handle);
-    if(p_info == NULL || p_info->start_handle == 0)
-        return -1;
-    ret = ble_gattc_disc_all_chrs(conn_handle,p_info->start_handle,p_info->end_handle,char_disc_cb,NULL);
-    if(ret != 0) {
-        ESP_LOGE(TAG, "Failed to discover characteristics; rc=%d\n", ret);
-    }
-    return ret;
-}
-
-// typedef int ble_gatt_disc_svc_fn(uint16_t conn_handle,
-//                                  const struct ble_gatt_error *error,
-//                                  const struct ble_gatt_svc *service,
-//                                  void *arg);
-static int svr_svc_disc_cb(uint16_t conn_handle, const struct ble_gatt_error *error, const struct ble_gatt_svc *service, void *arg)
-{
-    char buf[BLE_UUID_STR_LEN+1];
-    
-    if(conn_handle >= MAX_CONN_INSTANCES) {
-        ESP_LOGE(TAG, "svr_svc_disc_cb: Invalid conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-    
-    gattc_service_t*p_info = gattc_get_service_info(conn_handle);
-    if(p_info == NULL) {
-        ESP_LOGE(TAG, "char_disc_cb: Invalid service info for conn_handle %d", conn_handle);
-        return BLE_HS_EINVAL;
-    }
-    switch(error->status){
-        case 0:
-            ESP_LOGI(TAG, "Service discovered; conn_handle=%d start_handle=%d end_handle=%d uuid=%s",
-                                conn_handle,service->start_handle,
-                                service->end_handle,
-                                ble_uuid_to_str((const ble_uuid_t *)&service->uuid,buf));
-            p_info->start_handle = service->start_handle;
-            p_info->end_handle = service->end_handle;
-            break;
-
-        case BLE_HS_EDONE:
-            ESP_LOGI(TAG, "Service discovery complete; conn_handle=%d status=%d",conn_handle,error->status);
-            if(p_info->start_handle == 0){
-                ESP_LOGE(TAG, "Service not found");
-                esp_ble_disconnect(conn_handle);
-            }else{
-                gattc_find_char(conn_handle);
-                
-            }
-            break;
-
-        default:
-            ESP_LOGE(TAG, "Service discovery failed; status=%d conn_handle=%d",error->status,conn_handle);
-            esp_ble_disconnect(conn_handle);
-            break;
-    }
-    return 0;
-}
-
-static int gattc_find_service(uint16_t conn_handle)
-{
-    int ret;
-    if(conn_handle >= MAX_CONN_INSTANCES)
-        return -1;
-    gattc_service_info_rst(conn_handle);
-    ret = ble_gattc_disc_svc_by_uuid(conn_handle,(const ble_uuid_t *)&gatt_svr_svc_uuid,svr_svc_disc_cb,NULL);
-    if(ret != 0) {
-        ESP_LOGE(TAG, "Failed to discover services; rc=%d\n", ret);
-
-    }
-    return ret;
-}
 
 int esp_ble_connect(uint8_t* remote_bda, uint8_t remote_addr_type)
 {
-    ble_addr_t addr;
-    const struct ble_gap_conn_params conn_params = {
-        .scan_itvl = BLE_GAP_SCAN_ITVL_MS(80),
-        .scan_window = BLE_GAP_SCAN_WIN_MS(80),
-        .itvl_min = BLE_GAP_CONN_ITVL_MS(7.5),
-        .itvl_max = BLE_GAP_CONN_ITVL_MS(30),
-        .latency = 0,
-        .supervision_timeout = BLE_GAP_SUPERVISION_TIMEOUT_MS(4000),
-    };
-    memset(&addr,0,sizeof(addr));
-    mac_rever(addr.val,remote_bda);
-    addr.type = remote_addr_type;
-
-    m_ble_scan_need_recover = ble_gap_disc_active()? true : false;
-    if(m_ble_scan_need_recover)
-        esp_ble_scan_stop();
-
-    ble_gap_conn_cancel();
-    // int ble_gap_connect(uint8_t own_addr_type, const ble_addr_t *peer_addr,
-    //                 int32_t duration_ms,
-    //                 const struct ble_gap_conn_params *params,
-    //                 ble_gap_event_fn *cb, void *cb_arg);
-
-    return ble_gap_connect(OWN_ADDR_TYPE,&addr,BLE_HS_FOREVER, &conn_params,ble_gap_event,NULL);
+    return -1;
 }
 //=============================================================================================================================//
 /*
@@ -568,57 +414,19 @@ send data
 */
 //=============================================================================================================================//
 
-// typedef int ble_gatt_attr_fn(uint16_t conn_handle,
-//                              const struct ble_gatt_error *error,
-//                              struct ble_gatt_attr *attr,
-//                              void *arg);
-
-static int gattc_write_cb(uint16_t conn_handle,
-                             const struct ble_gatt_error *error,
-                             struct ble_gatt_attr *attr,
-                             void *arg)
-{
-    ESP_LOGI(TAG, "gattc_write_cb; status=%d conn_handle=%d "
-                      "attr_handle=%d\n",
-                error->status, conn_handle, attr->handle);
-    //tx finish
-    return 0;
-}
-
 int esp_ble_write_data(uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint16_t len, uint8_t write_type){
-    int ret;
-    if(handle == 0 || handle == 0xffff|| p_data == NULL || len == 0 || conn_id >= MAX_CONN_INSTANCES
-        // || (write_type != ESP_GATT_WRITE_TYPE_NO_RSP && write_type != ESP_GATT_WRITE_TYPE_RSP)
-       
-    ){
-         return -1;
-    }
-
-    if(len > m_mtu - 3){
-        ESP_LOGE(TAG,"esp_ble_write_data:%d > m_mtu:%d - 3",len,m_mtu);
-        return -1;
-    }
-
-    if(write_type == BLE_GATT_CHR_PROP_WRITE_NO_RSP)
-        ret = ble_gattc_write_no_rsp_flat(conn_id, handle, p_data, len);
-    else if(write_type == BLE_GATT_CHR_PROP_WRITE){
-        ret = ble_gattc_write_flat(conn_id, handle, p_data, len, gattc_write_cb, NULL);
-    }else{
-        return -1;
-    }
-    if (ret != 0) {
-        ESP_LOGE(TAG, "esp_ble_notify_data failed: %d", ret);
-        if(ret == BLE_HS_ENOMEM){
-            return ESP_ERR_NO_MEM;
-        }
-    }
-    return ret;
+    return -1;
 }
 
 uint16_t esp_ble_get_mtu(uint16_t conn_id){
     if(conn_id >= MAX_CONN_INSTANCES)
         return 0;
-    return m_mtu;
+    return mtu_get(conn_id);
+}
+
+uint16_t esp_ble_get_notify_handle(void)
+{
+    return gatt_svr_notify_chr_val_handle;
 }
 
 int esp_ble_notify_data(uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint16_t len){
@@ -629,12 +437,12 @@ int esp_ble_notify_data(uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint
         return -1;
     }
 
-    if(len > m_mtu-3){
+    if(len > mtu_get(conn_id)-3){
         ESP_LOGE(TAG,"esp_ble_write_data:len > p_dev->mtu_size-3");
         return -1;
     }
 
-    if(!m_notify_en){
+    if(!notify_is_enable(conn_id)){
         ESP_LOGE(TAG,"data_ntf_en is 0");
         return -1;
     }
@@ -766,18 +574,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if(ret){
             ESP_LOGE(TAG,"ble_gap_conn_find:%d",ret);
         }
-        ESP_LOGI(TAG,"BLE_GAP_EVENT_CONNECT:%d,%d",event->connect.status,event->connect.conn_handle);
-        
+        ESP_LOGI(TAG,"BLE_GAP_EVENT_CONNECT:%d,%d,%d",event->connect.status,event->connect.conn_handle,dev_desc.role);
+
+        connparam_init(event->connect.conn_handle,dev_desc.role,dev_desc.peer_id_addr.val);
+
         ret = ble_gap_set_data_len(event->connect.conn_handle,251,2120);
         if(ret){
             ESP_LOGE(TAG,"ble_gap_set_data_len:%d,%d",event->connect.conn_handle,ret);
         }
 
-        ret = ble_att_set_preferred_mtu(BLE_MTU_MAX);
-        if (ret != 0) {
-            ESP_LOGE(TAG, "Failed to set preferred MTU; rc = %d", ret);
-        }
-        
         // 通知应用层连接事件
         for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
             if (g_ble_event_callbacks[i] != NULL) {
@@ -786,40 +591,29 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 evt.params.connected.conn_id = event->connect.conn_handle;
                 evt.params.connected.role = dev_desc.role;
                 // 这里需要获取远程设备地址，暂时置0
-                memset(evt.params.connected.remote_bda, 0, 6);
-                evt.params.connected.remote_addr_type = 0;
+                memcpy(evt.params.connected.remote_bda, dev_desc.peer_id_addr.val, 6);
+                evt.params.connected.remote_addr_type = dev_desc.peer_id_addr.type;
                 g_ble_event_callbacks[i](&evt);
             }
         }
-        const struct ble_gap_upd_params conn_params = {
-            .latency = 0,
-            .itvl_max = 24,
-            .itvl_min = 12,
-            .supervision_timeout = 500
-        };
 
-        ret = ble_gap_update_params(event->connect.conn_handle,&conn_params);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "GAP conn params update failed:%d",ret);
-            break;
-        }
+        
     break;
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG,"BLE_GAP_EVENT_DISCONNECT:%x,%d",event->disconnect.reason,event->disconnect.conn.conn_handle);
-        
+        connparam_deinit(event->disconnect.conn.conn_handle);
         // 通知应用层断开连接事件
         for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
             if (g_ble_event_callbacks[i] != NULL) {
                 ble_evt_t evt;
                 evt.evt_id = BLE_EVT_DISCONNECTED;
                 evt.params.disconnected.conn_id = event->disconnect.conn.conn_handle;
-                memset(evt.params.disconnected.remote_bda, 0, 6);
-                evt.params.disconnected.remote_addr_type = 0;
                 g_ble_event_callbacks[i](&evt);
             }
         }
-        
+
+        notify_set_enable(event->disconnect.conn.conn_handle, 0);
         if(event->disconnect.conn.role == BLE_GAP_ROLE_SLAVE){
             adv_start();
         }
@@ -841,14 +635,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             event->link_estab.conn_handle,
             dev_desc.role == BLE_GAP_ROLE_SLAVE ? "peripheral" : "central");
 
-        ret = ble_gattc_exchange_mtu(event->link_estab.conn_handle, NULL, NULL);
-        if (ret != 0) {
-            ESP_LOGE(TAG, "ble_gattc_exchange_mtu failed: %d", ret);
-        }
-
-        if(dev_desc.role == BLE_GAP_ROLE_MASTER){
-            gattc_find_service(event->link_estab.conn_handle);
-        }
     break;
     
     case BLE_GAP_EVENT_MTU:
@@ -857,7 +643,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if(ret){
             ESP_LOGE(TAG,"ble_gap_conn_find:%d",ret);
         }else{
-            m_mtu = event->mtu.value;
+            mtu_set(event->mtu.conn_handle,event->mtu.value);
         }
 
     break;
@@ -886,7 +672,17 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 event->subscribe.prev_indicate,
                 event->subscribe.cur_indicate);
         if(event->subscribe.reason != BLE_GAP_SUBSCRIBE_REASON_TERM && gatt_svr_notify_chr_val_handle == event->subscribe.attr_handle){
-            m_notify_en = event->subscribe.cur_notify;
+            notify_set_enable(event->subscribe.conn_handle,event->subscribe.cur_notify);
+            ble_evt_t evt;
+            evt.evt_id = BLE_EVT_NOTIFY_CFG;
+            evt.params.notify_cfg.conn_id = event->subscribe.conn_handle;
+            evt.params.notify_cfg.handle = event->subscribe.attr_handle;
+            evt.params.notify_cfg.notify = event->subscribe.cur_notify;
+            for (int i = 0; i < BLE_EVT_CALLBACK_MAX; i++) {
+                if (g_ble_event_callbacks[i] != NULL) {
+                    g_ble_event_callbacks[i](&evt);
+                }
+            }
         }else if(event->subscribe.reason == BLE_GAP_SUBSCRIBE_REASON_TERM){
             
         }
@@ -1086,6 +882,8 @@ int esp_ble_init(void)
 {
     esp_err_t ret;
 
+    mtu_init();
+    
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init nimble %d ", ret);
@@ -1098,7 +896,15 @@ int esp_ble_init(void)
     
     gatts_init();
 
+    ret = ble_att_set_preferred_mtu(BLE_MTU_MAX);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to set preferred MTU; rc = %d", ret);
+    }
+
     nimble_port_freertos_init(ble_host_task);
+
+    connparam_update_timer_init();
+
     esp_log_level_set(TAG, USR_ESP_BLE_LOG_LEVEL);
     return 0;
 }

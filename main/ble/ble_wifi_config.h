@@ -45,6 +45,12 @@ int ble_wifi_config_stop_advertising(void);
 void ble_wifi_config_deinit(void);
 void ble_wifi_config_disconnect(uint16_t conn_handle);
 
+// 注册WiFi配置协议处理器
+esp_err_t ble_wifi_config_register_handlers(void);
+
+// 注销WiFi配置协议处理器
+esp_err_t ble_wifi_config_unregister_handlers(void);
+
 #ifdef __cplusplus
 }
 

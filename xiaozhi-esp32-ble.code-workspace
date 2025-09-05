@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../esp/idf"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"esp_ble.h": "c",
+			"esp_err.h": "c",
+			"array": "cpp",
+			"ranges": "cpp",
+			"span": "cpp",
+			"vector": "cpp",
+			"xstring": "cpp",
+			"xutility": "cpp",
+			"functional": "cpp"
+		}
+	}
+}

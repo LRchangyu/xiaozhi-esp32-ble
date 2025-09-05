@@ -7,8 +7,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define BLE_MAX_CONN  CONFIG_BT_CTRL_BLE_MAX_ACT
+#define BLE_MAX_CONN  CONFIG_NIMBLE_MAX_CONNECTIONS
 
 #define ADV_DATA_MAX_LEN 31
 typedef struct
@@ -48,6 +47,7 @@ uint16_t esp_ble_get_notify_handle(void);
 typedef enum{
     BLE_EVT_CONNECTED,
     BLE_EVT_DISCONNECTED,
+    BLE_EVT_NOTIFY_CFG,
     BLE_EVT_DATA_RECEIVED,
     BLE_EVT_DATA_SENT,
 }ble_evt_id_e;
@@ -61,9 +61,13 @@ typedef struct{
 
 typedef struct{
     uint16_t conn_id;
-    uint8_t remote_bda[6];
-    uint8_t remote_addr_type;
 }ble_evt_disconnected_t;
+
+typedef struct{
+    uint16_t conn_id;
+    uint16_t handle;
+    uint8_t notify;
+}ble_evt_notify_cfg_t;
 
 typedef struct{
     uint16_t conn_id;
@@ -82,8 +86,10 @@ typedef struct{
 typedef struct{
     ble_evt_id_e evt_id;
     union{
+        uint16_t conn_id;
         ble_evt_connected_t connected;
         ble_evt_disconnected_t disconnected;
+        ble_evt_notify_cfg_t notify_cfg;
         ble_evt_data_received_t data_received;
         ble_evt_data_sent_t data_sent;
     }params;

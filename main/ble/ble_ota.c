@@ -86,21 +86,14 @@ typedef struct {
     // 互斥锁
     SemaphoreHandle_t mutex;
     
-    // 队列和任务
-    QueueHandle_t data_queue;
-    TaskHandle_t task_handle;
-    bool task_running;
 } ble_ota_context_t;
 
 static ble_ota_context_t g_ota_ctx = {0};
 
 // 函数声明
-static void ble_ota_event_handler(ble_evt_t *evt);
-static void ble_ota_task(void *arg);
-static esp_err_t ble_ota_process_data(uint16_t conn_id, uint8_t *data, uint16_t len);
-static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, uint8_t *data, uint16_t len);
-static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, uint16_t len);
-static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, uint8_t *data, uint16_t len);
+static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len);
+static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len);
+static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len);
 static bool ble_ota_check_version(const uint8_t *new_version);
 
 esp_err_t ble_ota_init(ble_ota_progress_callback_t progress_cb)
@@ -116,85 +109,21 @@ esp_err_t ble_ota_init(ble_ota_progress_callback_t progress_cb)
         ESP_LOGE(TAG, "Failed to create mutex");
         return ESP_ERR_NO_MEM;
     }
-    
-    // 创建数据队列
-    g_ota_ctx.data_queue = xQueueCreate(BLE_OTA_QUEUE_SIZE, sizeof(ble_ota_data_msg_t*));
-    if (g_ota_ctx.data_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create data queue");
-        vSemaphoreDelete(g_ota_ctx.mutex);
-        return ESP_ERR_NO_MEM;
-    }
-    
-    // 创建OTA处理任务
-    BaseType_t ret = xTaskCreate(
-        ble_ota_task,
-        "ble_ota_task",
-        BLE_OTA_TASK_STACK_SIZE,
-        NULL,
-        BLE_OTA_TASK_PRIORITY,
-        &g_ota_ctx.task_handle
-    );
-    
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create OTA task");
-        vQueueDelete(g_ota_ctx.data_queue);
-        vSemaphoreDelete(g_ota_ctx.mutex);
-        return ESP_ERR_NO_MEM;
-    }
 
-    // 注册BLE事件回调
-    esp_err_t esp_ret = esp_ble_register_evt_callback(ble_ota_event_handler);
-    if (esp_ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register BLE callback: %s", esp_err_to_name(esp_ret));
-        g_ota_ctx.task_running = false;
-        vTaskDelete(g_ota_ctx.task_handle);
-        vQueueDelete(g_ota_ctx.data_queue);
-        vSemaphoreDelete(g_ota_ctx.mutex);
-        return esp_ret;
-    }
-    
+    ble_ota_register_handlers();
+
     ESP_LOGI(TAG, "BLE OTA module initialized successfully");
-    g_ota_ctx.task_running = true;
     return ESP_OK;
 }
 
 esp_err_t ble_ota_deinit(void)
 {
     ESP_LOGI(TAG, "Deinitializing BLE OTA module");
-    
-    // 取消注册BLE事件回调
-    esp_ble_unregister_evt_callback(ble_ota_event_handler);
-    
-    // 停止任务
-    if (g_ota_ctx.task_running) {
-        g_ota_ctx.task_running = false;
-        
-        // 发送空消息通知任务退出
-        ble_ota_data_msg_t* exit_msg = NULL;
-        xQueueSend(g_ota_ctx.data_queue, &exit_msg, 0);
-        
-        // 等待任务退出
-        vTaskDelay(pdMS_TO_TICKS(100));
-        
-        if (g_ota_ctx.task_handle) {
-            vTaskDelete(g_ota_ctx.task_handle);
-            g_ota_ctx.task_handle = NULL;
-        }
-    }
-    
-    // 清理队列
-    if (g_ota_ctx.data_queue) {
-        // 清理队列中剩余的消息
-        ble_ota_data_msg_t* msg;
-        while (xQueueReceive(g_ota_ctx.data_queue, &msg, 0) == pdTRUE) {
-            if (msg) {
-                free(msg);
-            }
-        }
-        vQueueDelete(g_ota_ctx.data_queue);
-        g_ota_ctx.data_queue = NULL;
-    }
-    
+
+    xSemaphoreTake(g_ota_ctx.mutex, portMAX_DELAY);
+
+    ble_ota_unregister_handlers();
+
     // 如果正在进行OTA操作，终止它
     if (g_ota_ctx.state != BLE_OTA_STATE_IDLE && g_ota_ctx.ota_handle != 0) {
         esp_ota_abort(g_ota_ctx.ota_handle);
@@ -206,6 +135,58 @@ esp_err_t ble_ota_deinit(void)
     
     memset(&g_ota_ctx, 0, sizeof(g_ota_ctx));
     
+    return ESP_OK;
+}
+
+esp_err_t ble_ota_register_handlers(void)
+{
+    ESP_LOGI(TAG, "Registering BLE OTA protocol handlers");
+    
+    esp_err_t ret;
+    
+    // 注册文件信息处理器
+    ret = ble_protocol_register_handler(BLE_OTA_CMD_SEND_FILE_INFO, 
+                                        ble_ota_handle_send_file_info, 
+                                        "ota_send_file_info");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register file info handler: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // 注册文件数据处理器
+    ret = ble_protocol_register_handler(BLE_OTA_CMD_SEND_FILE_DATA, 
+                                        ble_ota_handle_send_file_data, 
+                                        "ota_send_file_data");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register file data handler: %s", esp_err_to_name(ret));
+        ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_FILE_INFO);
+        return ret;
+    }
+    
+    // 注册数据包CRC处理器
+    ret = ble_protocol_register_handler(BLE_OTA_CMD_SEND_PACKET_CRC, 
+                                        ble_ota_handle_send_packet_crc, 
+                                        "ota_send_packet_crc");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register packet CRC handler: %s", esp_err_to_name(ret));
+        ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_FILE_INFO);
+        ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_FILE_DATA);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "BLE OTA protocol handlers registered successfully");
+    return ESP_OK;
+}
+
+esp_err_t ble_ota_unregister_handlers(void)
+{
+    ESP_LOGI(TAG, "Unregistering BLE OTA protocol handlers");
+    
+    ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_FILE_INFO);
+    ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_FILE_DATA);
+    ble_protocol_unregister_handler(BLE_OTA_CMD_SEND_PACKET_CRC);
+    
+    ESP_LOGI(TAG, "BLE OTA protocol handlers unregistered");
     return ESP_OK;
 }
 
@@ -245,168 +226,17 @@ void ble_ota_reset_state(void)
     ESP_LOGI(TAG, "OTA state reset to IDLE");
 }
 
-static void ble_ota_task(void *arg)
-{
-    ble_ota_data_msg_t* msg;
-    
-    ESP_LOGI(TAG, "BLE OTA task started");
-    while(!g_ota_ctx.task_running){
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    while (g_ota_ctx.task_running) {
-        // 等待队列消息
-        if (xQueueReceive(g_ota_ctx.data_queue, &msg, pdMS_TO_TICKS(10000)) == pdTRUE) {
-            if (msg == NULL) {
-                // 收到退出信号
-                ESP_LOGI(TAG, "BLE OTA task received exit signal");
-                break;
-            }
-            
-            // 处理数据
-            ble_ota_process_data(msg->conn_id, msg->data, msg->len);
-            
-            // 释放消息内存
-            free(msg);
-
-            if(g_ota_ctx.success_finish) {
-                // 处理成功完成的情况
-                ESP_LOGI(TAG, "BLE OTA task completed successfully");
-                g_ota_ctx.progress_callback(100,"OTA finished successfully.");
-                break;
-            }
-        }
-    }
-    
-    ESP_LOGI(TAG, "BLE OTA task exited");
-    vTaskDelete(NULL);
-}
-
-static esp_err_t ble_ota_process_data(uint16_t conn_id, uint8_t *data, uint16_t len)
-{
-    // 检查最小包长度
-    if (len < 3) {
-        ESP_LOGE(TAG, "Received data too short: %d", len);
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 解析协议包
-    uint8_t cmd;
-    const uint8_t *payload;
-    size_t payload_len;
-    
-    if (!ble_protocol_parse_packet(data, len, &cmd, &payload, &payload_len)) {
-        ESP_LOGD(TAG, "Not OTA protocol data, ignoring");
-        return ESP_OK;
-    }
-    
-    // 只处理OTA相关的命令
-    if (!ble_protocol_is_ota_cmd(cmd)) {
-        ESP_LOGD(TAG, "Not an OTA command: 0x%02X", cmd);
-        return ESP_OK;
-    }
-    
-    ESP_LOGI(TAG, "Processing OTA command: 0x%02X, payload_len: %d", cmd, payload_len);
-    
-    switch (cmd) {
-        case BLE_OTA_CMD_SEND_FILE_INFO:
-            return ble_ota_handle_send_file_info(conn_id, (uint8_t*)payload, payload_len);
-            
-        case BLE_OTA_CMD_SEND_FILE_DATA:
-            return ble_ota_handle_send_file_data(conn_id, (uint8_t*)payload, payload_len);
-            
-        case BLE_OTA_CMD_SEND_PACKET_CRC:
-            return ble_ota_handle_send_packet_crc(conn_id, (uint8_t*)payload, payload_len);
-            
-        default:
-            ESP_LOGE(TAG, "Unknown OTA command: 0x%02X", cmd);
-            return ESP_ERR_NOT_SUPPORTED;
-    }
-}
-
-static void ble_ota_event_handler(ble_evt_t *evt)
-{
-    if (evt == NULL) {
-        return;
-    }
-    
-    switch (evt->evt_id) {
-        case BLE_EVT_CONNECTED:
-            ESP_LOGI(TAG, "BLE connected, conn_id: %d", evt->params.connected.conn_id);
-            break;
-            
-        case BLE_EVT_DISCONNECTED:
-            ESP_LOGI(TAG, "BLE disconnected, conn_id: %d", evt->params.disconnected.conn_id);
-            // 如果正在进行OTA且连接断开，重置状态
-            if (g_ota_ctx.conn_id == evt->params.disconnected.conn_id) {
-                ble_ota_reset_state();
-            }
-            break;
-            
-        case BLE_EVT_DATA_RECEIVED:
-            {
-                uint8_t *data = evt->params.data_received.p_data;
-                uint16_t len = evt->params.data_received.len;
-                uint16_t conn_id = evt->params.data_received.conn_id;
-                
-                // 检查最小包长度
-                if (len < 3) {
-                    ESP_LOGE(TAG, "Received data too short: %d", len);
-                    return;
-                }
-                
-                // 快速检查是否为OTA协议包
-                if (data[0] != BLE_OTA_HEADER_0 || data[1] != BLE_OTA_HEADER_1) {
-                    ESP_LOGD(TAG, "Not OTA protocol header, ignoring");
-                    return;
-                }
-                
-                // 检查是否为OTA命令
-                uint8_t cmd = data[2];
-                if (!ble_protocol_is_ota_cmd(cmd)) {
-                    ESP_LOGD(TAG, "Not an OTA command: 0x%02X", cmd);
-                    return;
-                }
-                
-                // 分配消息内存
-                ble_ota_data_msg_t* msg = (ble_ota_data_msg_t*)malloc(sizeof(ble_ota_data_msg_t) + len);
-                if (msg == NULL) {
-                    ESP_LOGE(TAG, "Failed to allocate memory for OTA message");
-                    return;
-                }
-                
-                // 填充消息
-                msg->conn_id = conn_id;
-                msg->len = len;
-                memcpy(msg->data, data, len);
-                
-                // 发送到队列
-                if (xQueueSend(g_ota_ctx.data_queue, &msg, 0) != pdTRUE) {
-                    ESP_LOGE(TAG, "Failed to send message to OTA queue");
-                    free(msg);
-                    return;
-                }
-                
-                ESP_LOGD(TAG, "OTA data queued for processing");
-            }
-            break;
-            
-        default:
-            break;
-    }
-    
-}
-
 static void check_expected_bytes(void)
 {
     g_ota_ctx.expected_bytes = g_ota_ctx.file_size - g_ota_ctx.total_written >= g_ota_ctx.packet_length ? g_ota_ctx.packet_length : g_ota_ctx.file_size - g_ota_ctx.total_written;
 }
 
-static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, uint8_t *data, uint16_t len)
+static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
 {
     ESP_LOGI(TAG, "Handle send file info");
     
-    if (data == NULL || len != 11) { // 3 + 4 + 4 = 11 bytes
-        ESP_LOGE(TAG, "Invalid file info data length: %d", len);
+    if (payload == NULL || payload_len != 11) { // 3 + 4 + 4 = 11 bytes
+        ESP_LOGE(TAG, "Invalid file info data length: %d", payload_len);
         uint8_t ack = BLE_OTA_ACK_ERROR;
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_FILE_INFO, &ack, 1);
     }
@@ -418,9 +248,9 @@ static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, uint8_t *data, 
     }
     
     // 解析文件信息
-    memcpy(g_ota_ctx.version, data, 3);
-    g_ota_ctx.file_size = (data[3] << 0) | (data[4] << 8) | (data[5] << 16) | (data[6] << 24);
-    g_ota_ctx.file_crc32 = (data[7] << 0) | (data[8] << 8) | (data[9] << 16) | (data[10] << 24);
+    memcpy(g_ota_ctx.version, payload, 3);
+    g_ota_ctx.file_size = (payload[3] << 0) | (payload[4] << 8) | (payload[5] << 16) | (payload[6] << 24);
+    g_ota_ctx.file_crc32 = (payload[7] << 0) | (payload[8] << 8) | (payload[9] << 16) | (payload[10] << 24);
     g_ota_ctx.conn_id = conn_id;
     g_ota_ctx.received_bytes = 0;
     
@@ -462,7 +292,7 @@ static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, uint8_t *data, 
     ESP_LOGI(TAG, "esp_ota_begin %s", g_ota_ctx.ota_partition->label);
     
     // 设置数据包长度 (64-4096字节范围内)
-    g_ota_ctx.packet_length = 4096; // 默认1KB
+    g_ota_ctx.packet_length = 964; // 244- 3 =241， 241*4 = 964
 
     g_ota_ctx.ota_buffer = (uint8_t *)malloc(g_ota_ctx.packet_length);
     if (g_ota_ctx.ota_buffer == NULL) {
@@ -488,7 +318,7 @@ static esp_err_t ble_ota_handle_send_file_info(uint16_t conn_id, uint8_t *data, 
     return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_FILE_INFO, response, 3);
 }
 
-static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, uint16_t len)
+static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
 {
     if (g_ota_ctx.state != BLE_OTA_STATE_WAIT_FILE_DATA && g_ota_ctx.state != BLE_OTA_STATE_WAIT_PACKET_CRC) {
         ESP_LOGE(TAG, "Not in correct state for file data: %d", g_ota_ctx.state);
@@ -497,7 +327,7 @@ static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, 
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_FILE_DATA, &ack, 1);
     }
     
-    if (data == NULL || len == 0) {
+    if (payload == NULL || payload_len == 0) {
         ESP_LOGE(TAG, "Invalid file data");
         uint8_t ack = BLE_OTA_ACK_ERROR;
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_FILE_DATA, &ack, 1);
@@ -512,9 +342,9 @@ static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, 
     // 检查是否开始新的数据包
     
     // 检查数据长度
-    if (g_ota_ctx.received_bytes + len > g_ota_ctx.expected_bytes) {
+    if (g_ota_ctx.received_bytes + payload_len > g_ota_ctx.expected_bytes) {
         ESP_LOGE(TAG, "Received more data than expected: %d + %d > %lu", 
-                 g_ota_ctx.received_bytes, len, g_ota_ctx.expected_bytes);
+                 g_ota_ctx.received_bytes, payload_len, g_ota_ctx.expected_bytes);
         g_ota_ctx.state = BLE_OTA_STATE_ERROR;
         xSemaphoreGive(g_ota_ctx.mutex);
         uint8_t ack = BLE_OTA_ACK_ERROR;
@@ -523,15 +353,15 @@ static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, 
     }
 
     if (g_ota_ctx.ota_buffer) {
-        memcpy(g_ota_ctx.ota_buffer + g_ota_ctx.received_bytes, data, len);
+        memcpy(g_ota_ctx.ota_buffer + g_ota_ctx.received_bytes, payload, payload_len);
     }
 
     // 更新CRC32
-    g_ota_ctx.packet_crc32 = lr_crc_compute(data, len,&g_ota_ctx.packet_crc32);
-    g_ota_ctx.total_crc32 = lr_crc_compute(data, len,&g_ota_ctx.total_crc32);
-    g_ota_ctx.received_bytes += len;
+    g_ota_ctx.packet_crc32 = lr_crc_compute(payload, payload_len,&g_ota_ctx.packet_crc32);
+    g_ota_ctx.total_crc32 = lr_crc_compute(payload, payload_len,&g_ota_ctx.total_crc32);
+    g_ota_ctx.received_bytes += payload_len;
     
-    ESP_LOGD(TAG, "Received %d bytes, total: %lu/%lu", len, g_ota_ctx.received_bytes, g_ota_ctx.expected_bytes);
+    ESP_LOGD(TAG, "Received %d bytes, total: %lu/%lu", payload_len, g_ota_ctx.received_bytes, g_ota_ctx.expected_bytes);
     
     // 检查是否接收完一个数据包
     if (g_ota_ctx.received_bytes >= g_ota_ctx.expected_bytes) {
@@ -560,7 +390,7 @@ static esp_err_t ble_ota_handle_send_file_data(uint16_t conn_id, uint8_t *data, 
     return ESP_OK; // 不发送ACK，等待更多数据
 }
 
-static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, uint8_t *data, uint16_t len)
+static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
 {
     ESP_LOGI(TAG, "Handle send packet CRC");
     
@@ -571,8 +401,8 @@ static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, uint8_t *data,
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_PACKET_CRC, &ack, 1);
     }
     
-    if (data == NULL || len != 4) {
-        ESP_LOGE(TAG, "Invalid CRC data length: %d", len);
+    if (payload == NULL || payload_len != 4) {
+        ESP_LOGE(TAG, "Invalid CRC data length: %d", payload_len);
         uint8_t ack = BLE_OTA_ACK_ERROR;
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_PACKET_CRC, &ack, 1);
     }
@@ -583,7 +413,7 @@ static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, uint8_t *data,
         return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_PACKET_CRC, &ack, 1);
     }
     
-    uint32_t received_crc = (data[0] << 0) | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+    uint32_t received_crc = (payload[0] << 0) | (payload[1] << 8) | (payload[2] << 16) | (payload[3] << 24);
     
     ESP_LOGI(TAG, "Packet CRC check - Calculated: 0x%08lX, Received: 0x%08lX", 
              g_ota_ctx.packet_crc32, received_crc);
@@ -645,7 +475,13 @@ static esp_err_t ble_ota_handle_send_packet_crc(uint16_t conn_id, uint8_t *data,
     }
     xSemaphoreGive(g_ota_ctx.mutex);
 
-    return ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_PACKET_CRC, ack, 5);
+    int ret = ble_protocol_send_response(conn_id, BLE_OTA_CMD_SEND_PACKET_CRC, ack, 5);
+    if(g_ota_ctx.success_finish){
+        if(g_ota_ctx.progress_callback){
+            g_ota_ctx.progress_callback(100,"OTA升级成功，设备即将重启");
+        }
+    }
+    return ret;
 }
 
 static bool ble_ota_check_version(const uint8_t *new_version)

@@ -24,6 +24,8 @@
 #define MAIN_EVENT_VAD_CHANGE (1 << 3)
 #define MAIN_EVENT_ERROR (1 << 4)
 #define MAIN_EVENT_CHECK_NEW_VERSION_DONE (1 << 5)
+#define MAIN_EVENT_CLOCK_TICK (1 << 6)
+
 
 enum AecMode {
     kAecOff,
@@ -89,10 +91,9 @@ private:
 
     void OnWakeWordDetected();
     void CheckNewVersion(Ota& ota);
+    void CheckAssetsVersion();
     void ShowActivationCode(const std::string& code, const std::string& message);
-    void OnClockTimer();
     void SetListeningMode(ListeningMode mode);
-    bool IsWifiConfigMode();
 };
 
 #endif // _APPLICATION_H_
