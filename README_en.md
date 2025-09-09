@@ -2,6 +2,8 @@
 
 (English | [中文](README.md) | [日本語](README_ja.md))
 
+> In network configuration mode, enable BLE broadcasting, and activate the Bluetooth provisioning and upgrade functions.
+
 ## Video
 
 👉 [Human: Give AI a camera vs AI: Instantly finds out the owner hasn't washed hair for three days【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)

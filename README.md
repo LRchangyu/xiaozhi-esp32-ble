@@ -2,6 +2,8 @@
 
 （中文 | [English](README_en.md) | [日本語](README_ja.md)）
 
+> 配网模式下，开启 BLE 广播，蓝牙配网和升级功能启用。
+
 ## 视频
 
 👉 [人类：给 AI 装摄像头 vs AI：当场发现主人三天没洗头【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)

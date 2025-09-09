@@ -2,6 +2,8 @@
 
 （日本語 | [中文](README.md) | [English](README_en.md)）
 
+> ネットワーク設定モードでは、BLEブロードキャストを有効にし、Bluetoothのプロビジョニング機能とアップグレード機能を有効化します。
+
 ## 動画
 
 👉 [人間：AIにカメラを装着 vs AI：その場で飼い主が3日間髪を洗っていないことを発見【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)
