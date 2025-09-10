@@ -438,7 +438,7 @@ int esp_ble_notify_data(uint16_t conn_id, uint16_t handle, uint8_t *p_data, uint
     }
 
     if(len > mtu_get(conn_id)-3){
-        ESP_LOGE(TAG,"esp_ble_write_data:len > p_dev->mtu_size-3");
+        ESP_LOGE(TAG,"esp_ble_notify_data:len > p_dev->mtu_size-3");
         return -1;
     }
 
@@ -601,6 +601,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     break;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        mtu_set(event->disconnect.conn.conn_handle,23);
         ESP_LOGI(TAG,"BLE_GAP_EVENT_DISCONNECT:%x,%d",event->disconnect.reason,event->disconnect.conn.conn_handle);
         connparam_deinit(event->disconnect.conn.conn_handle);
         // 通知应用层断开连接事件
