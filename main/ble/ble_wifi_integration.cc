@@ -10,7 +10,8 @@
 #include "ble_ota.h"
 #include "esp_log.h"
 #include "wifi_configuration_ap.h"
-
+#include "board.h"
+#include "esp_timer.h"
 static const char* TAG = "BLE_WIFI_INTEGRATION";
 
 /*
@@ -26,6 +27,7 @@ namespace BleWifiIntegration {
 // 静态变量，用于跟踪蓝牙配网状态
 static bool ble_wifi_config_active = false;
 
+static esp_timer_handle_t clock_timer_handle_ = nullptr;
 // 前向声明
 void StopBleWifiConfig();
 
@@ -39,8 +41,8 @@ static void OnWifiConfigChanged(const std::string& ssid, const std::string& pass
     
     if (connected) {
         ESP_LOGI(TAG, "Successfully connected to WiFi: %s", ssid.c_str());
-        
-        // // 连接成功后，可以选择停止蓝牙配网以节省资源
+
+        // 连接成功后，可以选择停止蓝牙配网以节省资源
         // StopBleWifiConfig();
         
         // // 同时清理BLE OTA服务
@@ -54,6 +56,36 @@ static void OnWifiConfigChanged(const std::string& ssid, const std::string& pass
     } else {
         ESP_LOGW(TAG, "Failed to connect to WiFi: %s", ssid.c_str());
     }
+}
+
+static void update_adv(void){
+    auto& ble_wifi_config = BleWifiConfig::GetInstance();
+    if(!ble_wifi_config_active || ble_wifi_config.IsConnected()){
+        return;
+    }
+    static int last_battery_level = -1;
+    static bool last_charging = false;
+
+    int battery_level = 0;
+    bool charging = false, discharging = false;
+    auto& board = Board::GetInstance();
+    board.GetBatteryLevel(battery_level, charging, discharging);
+    
+    if(battery_level == last_battery_level && charging == last_charging){
+        return;
+    }
+
+    last_battery_level = battery_level;
+    last_charging = charging;
+
+    auto& wifi_ap = WifiConfigurationAp::GetInstance();
+    std::string ap_ssid = "Xiaozhi" + wifi_ap.GetSsid();
+    
+    ble_wifi_config.StopAdvertising();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ble_wifi_config.StartAdvertising(ap_ssid, battery_level, charging);
+
+    ESP_LOGI(TAG, "Advertising name: lr_wificfg-%s", ap_ssid.c_str());
 }
 
 // 启动蓝牙配网功能
@@ -76,21 +108,24 @@ bool StartBleWifiConfig() {
     
     // 设置WiFi配置改变回调
     ble_wifi_config.SetOnWifiConfigChanged(OnWifiConfigChanged);
-    
-    // 获取当前AP的SSID用于广播名称
-    auto& wifi_ap = WifiConfigurationAp::GetInstance();
-    std::string ap_ssid = "Xiaozhi" + wifi_ap.GetSsid();
-    
-    // 启动蓝牙广播
-    if (!ble_wifi_config.StartAdvertising(ap_ssid)) {
-        ESP_LOGE(TAG, "Failed to start BLE advertising");
-        ble_wifi_config.Deinitialize();
-        return false;
-    }
+
+    esp_timer_create_args_t clock_timer_args = {
+        .callback = [](void* arg) {
+            update_adv();
+        },
+        .name = "update_adv",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&clock_timer_args, &clock_timer_handle_);
     
     ble_wifi_config_active = true;
+
+    update_adv();
+
+    esp_timer_start_periodic(clock_timer_handle_, 5000000); // 每10秒
+
     ESP_LOGI(TAG, "BLE WiFi configuration started successfully");
-    ESP_LOGI(TAG, "Advertising name: lr_wificfg-%s", ap_ssid.c_str());
+    
     
     return true;
 }

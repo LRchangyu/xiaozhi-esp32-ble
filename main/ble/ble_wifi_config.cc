@@ -3,6 +3,7 @@
 #include "esp_ble.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include <esp_ota_ops.h>
 #include "nimble/ble.h"
 #include "host/ble_hs.h"
 #include "freertos/FreeRTOS.h"
@@ -15,10 +16,7 @@
 #include <algorithm>
 #include "wifi_configuration_ap.h"
 #include "ble_protocol.h"
-// 包含WiFi配置相关头文件 - 使用相对路径
-extern "C" {
 #include "ssid_manager.h"
-}
 
 #define TAG "BleWifiConfig"
 
@@ -27,6 +25,23 @@ static bool g_ble_initialized = false;
 static bool g_ble_advertising = false;
 static uint16_t g_conn_handle = 0xFFFF;
 static std::function<void(const std::string&, const std::string&)> g_wifi_config_callback;
+// C接口实现
+extern "C" {
+
+static void ble_evt_handler(ble_evt_t* evt)
+{
+    if(evt == NULL) {
+        return;
+    }
+
+    if(evt->evt_id == BLE_EVT_CONNECTED) {
+        ESP_LOGI(TAG, "BLE connected, conn_id=%d", evt->params.connected.conn_id);
+        g_conn_handle = evt->params.connected.conn_id;
+    } else if(evt->evt_id == BLE_EVT_DISCONNECTED) {
+        ESP_LOGI(TAG, "BLE disconnected, conn_id=%d", evt->params.disconnected.conn_id);
+        g_conn_handle = 0xFFFF;
+    }
+}
 
 // 获取当前WiFi配置
 static int handle_get_wifi_config_cmd(uint16_t conn_id ) {
@@ -175,8 +190,95 @@ static int handle_get_scan_list_cmd(uint16_t conn_id) {
     return ret;
 }
 
-// C接口实现
-extern "C" {
+
+// 协议处理器包装函数
+static esp_err_t ble_wifi_get_config_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI(TAG, "Handling get WiFi config command");
+
+    int ret = handle_get_wifi_config_cmd(conn_id);
+
+    if(ret){
+        ESP_LOGE(TAG, "Failed to get WiFi config: %d", ret);
+    }
+    return ret;
+}
+
+static esp_err_t ble_wifi_set_config_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI(TAG, "Handling set WiFi config command");
+
+    int ret = handle_set_wifi_config_cmd(conn_id,payload, payload_len);
+
+    if (ret) {
+        ESP_LOGE(TAG, "Failed to set WiFi config: %d", ret);
+    }
+   return ret;
+}
+
+static esp_err_t ble_wifi_get_scan_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI(TAG, "Handling get WiFi scan command");
+
+    int ret = handle_get_scan_list_cmd(conn_id);
+    
+    if (ret) {
+        ESP_LOGE(TAG, "Failed to get WiFi scan list: %d", ret);
+    }
+   return ret;
+}
+
+static esp_err_t ble_wifi_config_register_handlers(void)
+{
+    ESP_LOGI(TAG, "Registering BLE WiFi config protocol handlers");
+    
+    esp_err_t ret;
+    
+    // 注册获取WiFi配置处理器
+    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI, 
+                                        ble_wifi_get_config_handler, 
+                                        "wifi_get_config");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register get WiFi config handler: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // 注册设置WiFi配置处理器
+    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI, 
+                                        ble_wifi_set_config_handler, 
+                                        "wifi_set_config");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register set WiFi config handler: %s", esp_err_to_name(ret));
+        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
+        return ret;
+    }
+    
+    // 注册WiFi扫描处理器
+    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN, 
+                                        ble_wifi_get_scan_handler, 
+                                        "wifi_get_scan");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register WiFi scan handler: %s", esp_err_to_name(ret));
+        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
+        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "BLE WiFi config protocol handlers registered successfully");
+    return ESP_OK;
+}
+
+static esp_err_t ble_wifi_config_unregister_handlers(void)
+{
+    ESP_LOGI(TAG, "Unregistering BLE WiFi config protocol handlers");
+    
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN);
+    
+    ESP_LOGI(TAG, "BLE WiFi config protocol handlers unregistered");
+    return ESP_OK;
+}
 
 int ble_wifi_config_init(void) {
     if (g_ble_initialized) {
@@ -194,17 +296,24 @@ int ble_wifi_config_init(void) {
 
     ble_wifi_config_register_handlers();
 
+    esp_ble_register_evt_callback(ble_evt_handler);
+
     g_ble_initialized = true;
     ESP_LOGI(TAG, "BLE WiFi config initialized");
     return 0;
 }
 
-int ble_wifi_config_start_advertising(const char* ap_ssid) {
+int ble_wifi_config_start_advertising(const char* ap_ssid, int battery_level, bool charging) {
     if (!g_ble_initialized) {
         ESP_LOGE(TAG, "BLE not initialized");
         return -1;
     }
     
+    if(g_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "Device already connected, cannot start advertising");
+        return -1;
+    }
+
     if (g_ble_advertising) {
         ESP_LOGW(TAG, "Already advertising");
         return 0;
@@ -261,8 +370,20 @@ int ble_wifi_config_start_advertising(const char* ap_ssid) {
     rsp_data[rsp_len++] = 0xff;  // Manufacturer Specific Data
     rsp_data[rsp_len++] = (BLE_WIFI_CONFIG_MANUFACTURER_ID & 0xFF);
     rsp_data[rsp_len++] = (BLE_WIFI_CONFIG_MANUFACTURER_ID >> 8) & 0xFF;
-    rsp_data[rsp_len++] = (BLE_VERSION >> 8) & 0xFF;
+
+    const esp_app_desc_t *p_desc = esp_app_get_description();
+    int versino[3] = {0};
+    sscanf(p_desc->version, "%d.%d.%d", &versino[0], &versino[1], &versino[2]);
+    rsp_data[rsp_len++] = versino[0] & 0xFF;
+    rsp_data[rsp_len++] = versino[1] & 0xFF;
+    rsp_data[rsp_len++] = versino[2] & 0xFF;
+
     rsp_data[rsp_len++] = (BLE_VERSION & 0xFF);
+
+    if(battery_level < 0) battery_level = 0;
+    if(battery_level > 100) battery_level = 100;
+
+    rsp_data[rsp_len++] = (battery_level & 0xFF) | (charging ? 0x80 : 0x00);
 
     rsp_data[len_idx] = rsp_len - len_idx - 1; // 更新长度字段
 
@@ -335,11 +456,13 @@ BleWifiConfig& BleWifiConfig::GetInstance() {
 }
 
 bool BleWifiConfig::Initialize() {
+    
     return ble_wifi_config_init() == 0;
 }
 
-bool BleWifiConfig::StartAdvertising(const std::string& ap_ssid) {
-    return ble_wifi_config_start_advertising(ap_ssid.c_str()) == 0;
+bool BleWifiConfig::StartAdvertising(const std::string& ap_ssid, int battery_level, bool charging) {
+
+    return ble_wifi_config_start_advertising(ap_ssid.c_str(), battery_level, charging) == 0;
 }
 
 bool BleWifiConfig::StopAdvertising() {
@@ -364,97 +487,8 @@ void BleWifiConfig::SetOnWifiConfigChanged(std::function<void(const std::string&
     g_wifi_config_callback = callback;
 }
 
-// 协议处理器包装函数
-static esp_err_t ble_wifi_get_config_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
-{
-    ESP_LOGI(TAG, "Handling get WiFi config command");
-    g_conn_handle = conn_id;
-    int ret = handle_get_wifi_config_cmd(conn_id);
+bool BleWifiConfig::IsConnected() { 
+    return g_conn_handle != BLE_HS_CONN_HANDLE_NONE; 
+}   
 
-    if(ret){
-        ESP_LOGE(TAG, "Failed to get WiFi config: %d", ret);
-    }
-    return ret;
-}
 
-static esp_err_t ble_wifi_set_config_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
-{
-    ESP_LOGI(TAG, "Handling set WiFi config command");
-    g_conn_handle = conn_id;
-
-    int ret = handle_set_wifi_config_cmd(conn_id,payload, payload_len);
-
-    if (ret) {
-        ESP_LOGE(TAG, "Failed to set WiFi config: %d", ret);
-    }
-   return ret;
-}
-
-static esp_err_t ble_wifi_get_scan_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
-{
-    ESP_LOGI(TAG, "Handling get WiFi scan command");
-    g_conn_handle = conn_id;
-
-    int ret = handle_get_scan_list_cmd(conn_id);
-    
-    if (ret) {
-        ESP_LOGE(TAG, "Failed to get WiFi scan list: %d", ret);
-    }
-   return ret;
-}
-
-extern "C" {
-
-esp_err_t ble_wifi_config_register_handlers(void)
-{
-    ESP_LOGI(TAG, "Registering BLE WiFi config protocol handlers");
-    
-    esp_err_t ret;
-    
-    // 注册获取WiFi配置处理器
-    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI, 
-                                        ble_wifi_get_config_handler, 
-                                        "wifi_get_config");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register get WiFi config handler: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    // 注册设置WiFi配置处理器
-    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI, 
-                                        ble_wifi_set_config_handler, 
-                                        "wifi_set_config");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register set WiFi config handler: %s", esp_err_to_name(ret));
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
-        return ret;
-    }
-    
-    // 注册WiFi扫描处理器
-    ret = ble_protocol_register_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN, 
-                                        ble_wifi_get_scan_handler, 
-                                        "wifi_get_scan");
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register WiFi scan handler: %s", esp_err_to_name(ret));
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "BLE WiFi config protocol handlers registered successfully");
-    return ESP_OK;
-}
-
-esp_err_t ble_wifi_config_unregister_handlers(void)
-{
-    ESP_LOGI(TAG, "Unregistering BLE WiFi config protocol handlers");
-    
-    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
-    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
-    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN);
-    
-    ESP_LOGI(TAG, "BLE WiFi config protocol handlers unregistered");
-    return ESP_OK;
-}
-
-}

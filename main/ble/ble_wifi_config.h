@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define BLE_VERSION (0X0001)
+#define BLE_VERSION (0x03)
 #define BLE_WIFI_CONFIG_MANUFACTURER_ID (0xFFFF) // 自定义制造商ID
 
 // WiFi配置协议使用公共协议定义
@@ -41,19 +41,6 @@ extern "C" {
 // 广播名称前缀
 #define BLE_WIFI_CONFIG_ADV_NAME_PREFIX     BLE_PROTOCOL_ADV_NAME_PREFIX
 
-// 函数声明
-int ble_wifi_config_init(void);
-int ble_wifi_config_start_advertising(const char* ap_ssid);
-int ble_wifi_config_stop_advertising(void);
-void ble_wifi_config_deinit(void);
-void ble_wifi_config_disconnect(uint16_t conn_handle);
-
-// 注册WiFi配置协议处理器
-esp_err_t ble_wifi_config_register_handlers(void);
-
-// 注销WiFi配置协议处理器
-esp_err_t ble_wifi_config_unregister_handlers(void);
-
 #ifdef __cplusplus
 }
 
@@ -63,10 +50,11 @@ public:
     static BleWifiConfig& GetInstance();
     
     bool Initialize();
-    bool StartAdvertising(const std::string& ap_ssid);
+    bool StartAdvertising(const std::string& ap_ssid, int battery_level, bool charging);
     bool StopAdvertising();
     void Deinitialize();
     void Disconnect();
+    bool IsConnected();
 
     // 设置回调函数
     void SetOnWifiConfigChanged(std::function<void(const std::string&, const std::string&)> callback);
