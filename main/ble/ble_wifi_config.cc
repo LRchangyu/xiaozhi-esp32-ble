@@ -250,8 +250,23 @@ int ble_wifi_config_start_advertising(const char* ap_ssid) {
         adv_data[adv_len++] = (BLE_WIFI_CONFIG_SERVICE_UUID_16 & 0xFF);
         adv_data[adv_len++] = (BLE_WIFI_CONFIG_SERVICE_UUID_16 >> 8) & 0xFF;
     }
-    
-    ret = esp_ble_adv_set_data(adv_data, adv_len, nullptr, 0);
+
+    uint8_t rsp_data[31];
+    size_t rsp_len = 0;
+    uint8_t len_idx;
+    // 设置广播数据
+
+    len_idx = rsp_len;
+    rsp_data[rsp_len++] = 0;  // Length
+    rsp_data[rsp_len++] = 0xff;  // Manufacturer Specific Data
+    rsp_data[rsp_len++] = (BLE_WIFI_CONFIG_MANUFACTURER_ID & 0xFF);
+    rsp_data[rsp_len++] = (BLE_WIFI_CONFIG_MANUFACTURER_ID >> 8) & 0xFF;
+    rsp_data[rsp_len++] = (BLE_VERSION >> 8) & 0xFF;
+    rsp_data[rsp_len++] = (BLE_VERSION & 0xFF);
+
+    rsp_data[len_idx] = rsp_len - len_idx - 1; // 更新长度字段
+
+    ret = esp_ble_adv_set_data(adv_data, adv_len, rsp_data, rsp_len);
     if (ret != 0) {
         ESP_LOGE(TAG, "Failed to set advertising data: %d", ret);
         return ret;
