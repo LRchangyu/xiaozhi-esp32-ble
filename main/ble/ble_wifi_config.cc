@@ -335,7 +335,7 @@ int ble_wifi_config_start_advertising(const char* ap_ssid, int battery_level, bo
     }
     
     // 构建广播数据
-    uint8_t adv_data[31];
+    static uint8_t adv_data[31];
     size_t adv_len = 0;
     
     // Flags
@@ -360,7 +360,7 @@ int ble_wifi_config_start_advertising(const char* ap_ssid, int battery_level, bo
         adv_data[adv_len++] = (BLE_WIFI_CONFIG_SERVICE_UUID_16 >> 8) & 0xFF;
     }
 
-    uint8_t rsp_data[31];
+    static uint8_t rsp_data[31];
     size_t rsp_len = 0;
     uint8_t len_idx;
     // 设置广播数据

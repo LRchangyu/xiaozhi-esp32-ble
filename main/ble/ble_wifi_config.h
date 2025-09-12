@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define BLE_VERSION (0x03)
+#define BLE_VERSION (0x05)
 #define BLE_WIFI_CONFIG_MANUFACTURER_ID (0xFFFF) // 自定义制造商ID
 
 // WiFi配置协议使用公共协议定义

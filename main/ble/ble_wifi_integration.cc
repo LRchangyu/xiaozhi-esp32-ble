@@ -79,7 +79,7 @@ static void update_adv(void){
     last_charging = charging;
 
     auto& wifi_ap = WifiConfigurationAp::GetInstance();
-    std::string ap_ssid = "Xiaozhi" + wifi_ap.GetSsid();
+    std::string ap_ssid = wifi_ap.GetSsid();
     
     ble_wifi_config.StopAdvertising();
     vTaskDelay(pdMS_TO_TICKS(100));
