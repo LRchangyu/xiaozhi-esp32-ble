@@ -145,7 +145,7 @@ static int handle_get_scan_list_cmd(uint16_t conn_id) {
     std::vector<wifi_ap_record_t> local_scan_results = WifiConfigurationAp::GetInstance().GetAccessPoints();
     int ret;
     // 构建响应载荷
-    uint16_t len_limit = 200; // 设置一个安全的MTU限制，避免超过BLE MTU
+    uint16_t len_limit = BLE_PROTOCOL_MAX_PAYLOAD_LEN; // 设置一个安全的MTU限制，避免超过BLE MTU
     uint8_t arr[len_limit];
     uint16_t offset = 0;
     
@@ -191,6 +191,245 @@ static int handle_get_scan_list_cmd(uint16_t conn_id) {
 }
 
 
+// WiFi操作命令处理
+static int handle_wifi_operation_cmd(uint16_t conn_id, const uint8_t *payload, size_t payload_len) {
+    ESP_LOGI(TAG, "Handling WiFi operation command, payload_len=%d", payload_len);
+    
+    if (payload_len < 1) {
+        ESP_LOGE(TAG, "Invalid payload length for WiFi operation");
+        uint8_t error_resp = BLE_PROTOCOL_ACK_ERROR;
+        return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, &error_resp, 1);
+    }
+    
+    uint8_t opt = payload[0];
+    ESP_LOGI(TAG, "WiFi operation opt: 0x%02x", opt);
+    
+    switch (opt) {
+        case WIFI_OPT_GET_SSID_LIST: {
+            ESP_LOGI(TAG, "Getting SSID list");
+            
+            // 获取SSID列表
+            auto& ssid_manager = SsidManager::GetInstance();
+            const auto& ssid_list = ssid_manager.GetSsidList();
+            
+            // 构建响应载荷：count + (ssid_len + ssid + password_len + password)...
+            size_t total_len = 1; // count字节
+            for (const auto& item : ssid_list) {
+                total_len += 1 + item.ssid.length() + 1 + item.password.length();
+            }
+
+            int ret;
+            // 构建响应载荷
+            uint16_t len_limit = BLE_PROTOCOL_MAX_PAYLOAD_LEN ; // 设置一个安全的MTU限制，避免超过BLE MTU
+            uint8_t arr[len_limit];
+            uint16_t offset = 0;
+            
+            int i = 0;
+            do {
+                memset(arr, 0, sizeof(arr));
+                arr[0] = WIFI_OPT_GET_SSID_LIST;
+                arr[1] = 0;
+                offset = 2;
+                
+                while (i < ssid_list.size()) {
+                    const char* ssid_str = ssid_list[i].ssid.c_str();
+                    uint8_t ssid_len = ssid_list[i].ssid.length();
+                    
+                    // 检查是否会超出缓冲区
+                    if (offset + ssid_len + 1 > len_limit) {
+                        break;
+                    }
+                    
+                    arr[1]++;
+                    arr[offset++] = ssid_len;
+                    memcpy(&arr[offset], ssid_str, ssid_len);
+                    offset += ssid_len;
+                    i++;
+                }
+
+                if (arr[1] > 0) {
+                    ret = ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT,
+                                                    arr, offset);
+                    
+                    vTaskDelay(pdMS_TO_TICKS(10)); // 小延迟避免发送过快
+                } else {
+                    break;
+                }
+                
+            } while (i < ssid_list.size());
+
+            // 发送结束标记
+            uint8_t end_marker[] = {WIFI_OPT_GET_SSID_LIST,0x00};
+            ret = ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+
+            ESP_LOGI(TAG, "ssid list response sent  %d APs", (int)ssid_list.size());
+            return ret;
+        }
+        
+        case WIFI_OPT_SET_SSID: {
+            ESP_LOGI(TAG, "Setting SSID (reuse set config)");
+            // 复用现有的set wifi config功能
+            payload = payload + 1;
+            payload_len = payload_len>0?payload_len - 1:0;
+            ESP_LOGI(TAG, "Handling set WiFi config command, payload_len=%d", payload_len);
+            
+            if (payload_len < 2) {
+                ESP_LOGE(TAG, "Invalid payload length for set WiFi config");
+                uint8_t end_marker[] = {WIFI_OPT_SET_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+            
+            // 解析载荷：ssid_len + ssid + password_len + password
+            size_t offset = 0;
+            uint8_t ssid_len = payload[offset++];
+            
+            if (offset + ssid_len >= payload_len) {
+                ESP_LOGE(TAG, "Invalid SSID length");
+                uint8_t end_marker[] = {WIFI_OPT_SET_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+            
+            std::string ssid((char*)&payload[offset], ssid_len);
+            offset += ssid_len;
+            
+            if (offset >= payload_len) {
+                ESP_LOGE(TAG, "Missing password length");
+                uint8_t end_marker[] = {WIFI_OPT_SET_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+            
+            uint8_t password_len = payload[offset++];
+            
+            if (offset + password_len > payload_len) {
+                ESP_LOGE(TAG, "Invalid password length");
+                uint8_t end_marker[] = {WIFI_OPT_SET_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+            
+            std::string password((char*)&payload[offset], password_len);
+            
+            ESP_LOGI(TAG, "Setting WiFi config: ssid=%s, password_len=%d", ssid.c_str(), password.length());
+            
+            // 保存到SSID管理器
+            auto& ssid_manager = SsidManager::GetInstance();
+            ssid_manager.AddSsid(ssid, password);
+            
+            // 如果有回调函数，通知WiFi配置改变
+            if (g_wifi_config_callback) {
+                g_wifi_config_callback(ssid, password);
+            }
+            
+            // 返回成功响应
+            uint8_t end_marker[] = {WIFI_OPT_SET_SSID,BLE_PROTOCOL_ACK_SUCCESS};
+            return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+        }
+        
+        case WIFI_OPT_SCAN: {
+            ESP_LOGI(TAG, "WiFi scan (reuse scan list)");
+
+            // 复用现有的scan功能
+            // 获取当前扫描结果
+            std::vector<wifi_ap_record_t> local_scan_results = WifiConfigurationAp::GetInstance().GetAccessPoints();
+            int ret;
+            // 构建响应载荷
+            uint16_t len_limit = BLE_PROTOCOL_MAX_PAYLOAD_LEN; // 设置一个安全的MTU限制，避免超过BLE MTU
+            uint8_t arr[len_limit];
+            uint16_t offset = 0;
+
+            int i = 0;
+            do {
+                memset(arr, 0, sizeof(arr));
+                arr[0] = WIFI_OPT_SCAN;
+                arr[1] = 0;
+                offset = 2;
+                
+                while (i < local_scan_results.size()) {
+                    const char* ssid_str = (const char*)local_scan_results[i].ssid;
+                    uint8_t ssid_len = strlen(ssid_str);
+                    
+                    // 检查是否会超出缓冲区
+                    if (offset + ssid_len + 1 > len_limit) {
+                        break;
+                    }
+                    
+                    arr[1]++;
+                    arr[offset++] = ssid_len;
+                    memcpy(&arr[offset], ssid_str, ssid_len);
+                    offset += ssid_len;
+                    i++;
+                }
+
+                if (arr[1] > 0) {
+                    ret = ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT,
+                                                    arr, offset);
+                    
+                    vTaskDelay(pdMS_TO_TICKS(10)); // 小延迟避免发送过快
+                } else {
+                    break;
+                }
+                
+            } while (i < local_scan_results.size());
+
+            // 发送结束标记
+            uint8_t end_marker[] = {WIFI_OPT_SCAN,0x00};
+            ret = ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+
+            ESP_LOGI(TAG, "Scan list response sent, found %d APs", (int)local_scan_results.size());
+            return ret;
+        }
+        
+        case WIFI_OPT_DELETE_SSID: {
+            ESP_LOGI(TAG, "Deleting specific SSID");
+            ESP_LOG_BUFFER_HEX(TAG, payload, payload_len);
+            
+            //SKIP OPT
+            payload = payload + 1;//SKIP OPT
+            payload_len = payload_len>0?payload_len - 1:0;
+            
+            if (payload_len  == 0 || payload_len > 32) {
+                ESP_LOGE(TAG, "Invalid payload for delete SSID operation");
+                uint8_t end_marker[] = {WIFI_OPT_DELETE_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+            
+            // 解析SSID：ssid_len + ssid
+            uint8_t ssid_len = payload_len;
+            
+            std::string target_ssid((char*)payload, ssid_len);
+            ESP_LOGI(TAG, "Deleting SSID: %s", target_ssid.c_str());
+            
+            // 查找并删除指定SSID
+            auto& ssid_manager = SsidManager::GetInstance();
+            const auto& ssid_list = ssid_manager.GetSsidList();
+            
+            int found_index = -1;
+            for (size_t i = 0; i < ssid_list.size(); i++) {
+                if (ssid_list[i].ssid == target_ssid) {
+                    found_index = i;
+                    break;
+                }
+            }
+            
+            if (found_index >= 0) {
+                ssid_manager.RemoveSsid(found_index);
+                ESP_LOGI(TAG, "Successfully deleted SSID: %s", target_ssid.c_str());
+ 
+                uint8_t end_marker[] = {WIFI_OPT_DELETE_SSID,BLE_PROTOCOL_ACK_SUCCESS};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            } else {
+                ESP_LOGW(TAG, "SSID not found: %s", target_ssid.c_str());
+                uint8_t end_marker[] = {WIFI_OPT_DELETE_SSID,BLE_PROTOCOL_ACK_ERROR};
+                return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+            }
+        }
+        
+        default:
+            ESP_LOGE(TAG, "Unknown WiFi operation opt: 0x%02x", opt);
+            uint8_t end_marker[] = {opt,BLE_PROTOCOL_ACK_ERROR};
+            return ble_protocol_send_response(conn_id, BLE_PROTOCOL_CMD_WIFI_OPT, end_marker, sizeof(end_marker));
+    }
+}
+
 // 协议处理器包装函数
 static esp_err_t ble_wifi_get_config_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
 {
@@ -228,6 +467,38 @@ static esp_err_t ble_wifi_get_scan_handler(uint16_t conn_id, const uint8_t *payl
    return ret;
 }
 
+static esp_err_t ble_wifi_operation_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI(TAG, "Handling WiFi operation command");
+
+    int ret = handle_wifi_operation_cmd(conn_id, payload, payload_len);
+
+    if (ret) {
+        ESP_LOGE(TAG, "Failed to handle WiFi operation: %d", ret);
+    }
+    return ret;
+}
+
+static esp_err_t ble_rst_handler(uint16_t conn_id, const uint8_t *payload, uint16_t payload_len)
+{
+    ESP_LOGI(TAG, "Handling reset command");
+
+    // 执行重置操作
+    int ret;
+    uint8_t end_marker[] = {0x00};
+    ret = ble_protocol_send_response(conn_id, BLE_WIFI_CONFIG_CMD_GET_SCAN, end_marker, sizeof(end_marker));
+
+
+    if (ret) {
+        ESP_LOGE(TAG, "Failed to reset: %d", ret);
+    }
+    ESP_LOGI(TAG, "Device will restart in 2 seconds...");
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    return ret;
+}
+
 static esp_err_t ble_wifi_config_register_handlers(void)
 {
     ESP_LOGI(TAG, "Registering BLE WiFi config protocol handlers");
@@ -240,7 +511,7 @@ static esp_err_t ble_wifi_config_register_handlers(void)
                                         "wifi_get_config");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register get WiFi config handler: %s", esp_err_to_name(ret));
-        return ret;
+        goto ERROR;
     }
     
     // 注册设置WiFi配置处理器
@@ -249,8 +520,7 @@ static esp_err_t ble_wifi_config_register_handlers(void)
                                         "wifi_set_config");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register set WiFi config handler: %s", esp_err_to_name(ret));
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
-        return ret;
+        goto ERROR;
     }
     
     // 注册WiFi扫描处理器
@@ -259,13 +529,35 @@ static esp_err_t ble_wifi_config_register_handlers(void)
                                         "wifi_get_scan");
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register WiFi scan handler: %s", esp_err_to_name(ret));
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
-        ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
-        return ret;
+        goto ERROR;
     }
-    
+
+    // 注册WiFi操作处理器 (0x06)
+    ret = ble_protocol_register_handler(BLE_PROTOCOL_CMD_WIFI_OPT, 
+                                        ble_wifi_operation_handler, 
+                                        "wifi_operation");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register WiFi operation handler: %s", esp_err_to_name(ret));
+        goto ERROR;
+    }
+
+    // 注册重置处理器
+    ret = ble_protocol_register_handler(BLE_PROTOCOL_CMD_RST,
+                                        ble_rst_handler,
+                                        "device_reset");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register reset handler: %s", esp_err_to_name(ret));
+        goto ERROR;
+    }
     ESP_LOGI(TAG, "BLE WiFi config protocol handlers registered successfully");
     return ESP_OK;
+ERROR:
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
+    ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN);
+    ble_protocol_unregister_handler(BLE_PROTOCOL_CMD_WIFI_OPT);
+    ble_protocol_unregister_handler(BLE_PROTOCOL_CMD_RST);
+    return ret;
 }
 
 static esp_err_t ble_wifi_config_unregister_handlers(void)
@@ -275,6 +567,8 @@ static esp_err_t ble_wifi_config_unregister_handlers(void)
     ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_WIFI);
     ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_SET_WIFI);
     ble_protocol_unregister_handler(BLE_WIFI_CONFIG_CMD_GET_SCAN);
+    ble_protocol_unregister_handler(BLE_PROTOCOL_CMD_WIFI_OPT);
+    ble_protocol_unregister_handler(BLE_PROTOCOL_CMD_RST);
     
     ESP_LOGI(TAG, "BLE WiFi config protocol handlers unregistered");
     return ESP_OK;

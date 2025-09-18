@@ -87,7 +87,7 @@ private:
     bool aborted_ = false;
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
-
+    TaskHandle_t main_event_loop_task_handle_ = nullptr;
     bool ble_wifi_config_enabled_ = true;
 
     void OnWakeWordDetected();
@@ -95,6 +95,21 @@ private:
     void CheckAssetsVersion();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
+};
+
+
+class TaskPriorityReset {
+public:
+    TaskPriorityReset(BaseType_t priority) {
+        original_priority_ = uxTaskPriorityGet(NULL);
+        vTaskPrioritySet(NULL, priority);
+    }
+    ~TaskPriorityReset() {
+        vTaskPrioritySet(NULL, original_priority_);
+    }
+
+private:
+    BaseType_t original_priority_;
 };
 
 #endif // _APPLICATION_H_

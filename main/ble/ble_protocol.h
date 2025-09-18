@@ -17,11 +17,19 @@ extern "C" {
 #define BLE_PROTOCOL_CMD_GET_WIFI_CONFIG     0x00
 #define BLE_PROTOCOL_CMD_SET_WIFI_CONFIG     0x01
 #define BLE_PROTOCOL_CMD_GET_WIFI_SCAN       0x02
+#define BLE_PROTOCOL_CMD_WIFI_OPT            0x06
+
+#define WIFI_OPT_GET_SSID_LIST                0x00
+#define WIFI_OPT_SET_SSID                     0x01
+#define WIFI_OPT_SCAN                         0x02
+#define WIFI_OPT_DELETE_SSID                  0x03
 
 // OTA协议命令 (0x03-0x05)
 #define BLE_PROTOCOL_CMD_SEND_FILE_INFO      0x03
 #define BLE_PROTOCOL_CMD_SEND_FILE_DATA      0x04
 #define BLE_PROTOCOL_CMD_SEND_PACKET_CRC     0x05
+
+#define BLE_PROTOCOL_CMD_RST          0xFE
 
 // 公共响应状态
 #define BLE_PROTOCOL_ACK_SUCCESS             0x00
@@ -42,7 +50,7 @@ extern "C" {
 
 // 数据包长度限制
 #define BLE_PROTOCOL_MIN_PACKET_LEN          3       // header(2) + cmd(1)
-#define BLE_PROTOCOL_MAX_PAYLOAD_LEN         251     // 根据BLE MTU限制
+#define BLE_PROTOCOL_MAX_PAYLOAD_LEN         (CONFIG_NIMBLE_ATT_PREFERRED_MTU-3)    // 根据BLE MTU限制
 
 // 协议数据包结构
 typedef struct {
