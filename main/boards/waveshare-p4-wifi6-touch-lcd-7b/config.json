@@ -1,9 +1,10 @@
 {
-    "target": "esp32s3",
+    "target": "esp32p4",
     "builds": [
         {
-            "name": "lichuang-dev",
+            "name": "waveshare-p4-wifi6-touch-lcd-7b",
             "sdkconfig_append": [
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
                 "CONFIG_USE_DEVICE_AEC=y"
             ]
         }
